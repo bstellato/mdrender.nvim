@@ -144,6 +144,15 @@ function M.get(opts)
   return cache[key]
 end
 
+--- Recreate the highlight groups that carry the image ids (after `:highlight clear`).
+function M.restore_highlights()
+  for _, e in pairs(cache) do
+    if e.state == 'ready' then
+      kitty.hl(e.id)
+    end
+  end
+end
+
 --- Send every cached image again (after a terminal re-attach drops them).
 function M.retransmit()
   for _, e in pairs(cache) do

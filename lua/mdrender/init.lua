@@ -172,6 +172,13 @@ local function render(buf)
   end
   parser:parse(true)
 
+  -- Some themes clear every highlight group without firing ColorScheme. Notice it
+  -- here and define the groups again.
+  if vim.tbl_isempty(api.nvim_get_hl(0, { name = 'MdRenderRule' })) then
+    set_highlights()
+    mathr.restore_highlights()
+  end
+
   local lines = api.nvim_buf_get_lines(buf, 0, -1, false)
   local cur = api.nvim_win_get_cursor(win)[1] - 1
   local info = vim.fn.getwininfo(win)[1]
