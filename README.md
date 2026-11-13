@@ -8,6 +8,12 @@ One plugin, no dependencies on other plugins.
 - **Math** (`$...$`, `$$...$$` and fenced `math` blocks) is typeset with MathJax and drawn as images.
 - **Editing stays normal.** The line under the cursor always shows the raw source.
 
+<p align="center">
+  <img src="assets/screenshot.png" width="720" alt="A Markdown note with headings, math, lists, a quote, code and a table, rendered in Neovim">
+</p>
+
+The screenshot shows [`test/demo.md`](test/demo.md).
+
 ## Requirements
 
 - Neovim 0.11 or later (developed on 0.12), with `termguicolors` on.
@@ -191,7 +197,7 @@ nvim --headless --clean --cmd 'set rtp+=.' test/sample.md -c 'luafile test/headl
 ```
 
 This smoke test prints the number of decorations and transmitted images and any error
-messages. `test/sample.md`, `test/wrap.md` and `test/tables.md` are the visual test files.
+messages. `test/demo.md`, `test/sample.md`, `test/wrap.md` and `test/tables.md` are the visual test files.
 
 Layout:
 
