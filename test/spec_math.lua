@@ -64,6 +64,7 @@ return {
   end },
 
   { 'moving the cursor reuses the images', function()
+    H.math.clear() -- counts below must not depend on earlier tests
     H.open(doc, last)
     local before = H.transmits()
     for _, row in ipairs({ 0, 3, 7, 10, 12, 0, 12 }) do
@@ -73,6 +74,7 @@ return {
   end },
 
   { 'editing a formula renders only that one', function()
+    H.math.clear() -- counts below must not depend on earlier tests
     local buf = H.open(doc, last)
     local before = H.transmits()
     api.nvim_buf_set_lines(buf, 0, 1, false, { 'Inline $x^3$ here.' })
@@ -82,6 +84,7 @@ return {
   end },
 
   { 'the same formula twice is rendered once', function()
+    H.math.clear() -- counts below must not depend on earlier tests
     local before = H.transmits()
     H.open({ '$y_1$ and $y_1$ and $y_1$', '', 'end' }, 2)
     H.eq(before + 1, H.transmits(), 'images sent')

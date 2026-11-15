@@ -7,6 +7,8 @@ vim.api.nvim_ui_send = function() end
 local m = require('mdrender')
 m.setup({})
 local buf = vim.api.nvim_get_current_buf()
+-- Parse synchronously, so each timed call includes its drawing.
+vim.g._ts_force_sync_parsing = true
 local ns = vim.api.nvim_get_namespaces().mdrender
 local uv = vim.uv
 local function ms(f)
@@ -44,20 +46,13 @@ report('cursor move + render', function()
   vim.cmd('normal! j')
   m._render(buf)
 end)
--- After an edit the parse runs in slices; time the blocking first slice, then the
--- whole parse with slicing turned off.
+-- Most of an edit's cost is Neovim's injection scan, which the asynchronous parse
+-- cannot split (see issue #1).
 local row = vim.api.nvim_win_get_cursor(0)[1]
-report('edit + render, blocking part', function()
+report('edit + render', function()
   vim.api.nvim_buf_set_lines(buf, row, row, false, { 'new $z_1$ line' })
   m._render(buf)
 end)
-vim.wait(2000, function() return false end, 50)
-vim.g._ts_force_sync_parsing = true
-report('edit + render, synchronous parse', function()
-  vim.api.nvim_buf_set_lines(buf, row, row, false, { 'new $z_1$ line' })
-  m._render(buf)
-end)
-vim.g._ts_force_sync_parsing = nil
 
 if os.getenv('PROFILE') then
   local prof = require('jit.p')

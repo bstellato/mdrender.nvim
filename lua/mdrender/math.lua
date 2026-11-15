@@ -144,6 +144,7 @@ function M.get(opts)
   return cache[key]
 end
 
+-- Formulas sent to the renderer and not answered yet (for the tests).
 function M.pending_count()
   return vim.tbl_count(pending)
 end

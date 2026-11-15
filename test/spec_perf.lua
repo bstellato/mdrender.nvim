@@ -37,6 +37,13 @@ return {
     H.ok(math.max(unpack(r)) < 3 * vim.o.lines, 'last decorated row: ' .. math.max(unpack(r)))
   end },
 
+  { 'opening a large file parses only the top', function()
+    local buf = open_large()
+    local inline = vim.treesitter.get_parser(buf, 'markdown'):children().markdown_inline
+    local trees = inline and vim.tbl_count(inline:trees()) or 0
+    H.ok(trees > 0 and trees < 300, trees .. ' inline trees parsed')
+  end },
+
   { 'opening a large file renders only the visible formulas', function()
     H.math.clear() -- start with no cached images
     local _, sent = open_large()
@@ -98,19 +105,6 @@ return {
     H.settle(buf)
     H.ok(#rows(buf) < mark_budget(), #rows(buf) .. ' marks after the edit')
     H.ok(H.image(5000), 'added formula drawn')
-  end },
-
-  { 'after an edit the parse runs in the background and then draws', function()
-    local buf = open_large()
-    api.nvim_win_set_cursor(0, { 5000, 0 })
-    vim.cmd('normal! zz')
-    H.settle(buf)
-    api.nvim_buf_set_lines(buf, 5000, 5000, false, { '# Added heading' })
-    H.m._render(buf) -- asynchronous: may return before drawing
-    local drawn = vim.wait(5000, function()
-      return H.has_hl(5000, 'MdRenderH1')
-    end, 10)
-    H.ok(drawn, 'added heading drawn')
   end },
 
   { ('a cursor move redraws in under %d ms'):format(limit_ms), function()

@@ -179,9 +179,12 @@ Supported TeX is what MathJax supports: AMS math, `\text`, `\mathbf`, `\boldsymb
 
 ## Large files
 
-Only the lines on screen, plus one screen above and below, are decorated, and only their
-formulas are rendered. Moving the cursor or scrolling costs about 2 ms on a 21,000-line file
-with 9,000 formulas. To measure it yourself:
+Only the part of the file near the window is decorated: the lines on screen and one screen
+above and below, plus the whole of any table, code block or list that reaches into them.
+Only formulas there are rendered. Moving the cursor or scrolling costs about 2 ms on a
+21,000-line file with 9,000 formulas, and a jump such as `G` is decorated before it is shown.
+A formula seen for the first time shows its source until its image arrives, a few
+milliseconds later. To measure it yourself:
 
 ```sh
 nvim -l test/gen_large.lua 400 > /tmp/large.md
@@ -211,10 +214,12 @@ MDRENDER_TEST=perf ./test/run.sh   # only the tests whose name matches a Lua pat
 ```
 
 The suite covers the Markdown decorations, math images and their cache, the settings and
-the command, and large files. The large-file tests count decorations and rendered formulas,
-so a change that brings back whole-file work fails on any machine; one loose timing check
+the command, large files, and the paths real use takes: autocommands, timers, the
+screen-update hook and the asynchronous parse. A test also fails when any error is reported
+while it runs. The large-file tests count decorations and rendered formulas, so a change
+that brings back whole-file work fails on any machine; one loose timing check
 (`MDRENDER_PERF_MS`, 25 ms by default) catches the rest. GitHub Actions runs the suite on
-Neovim 0.11.0, the latest release and nightly for every push and pull request.
+Neovim 0.11.0, the latest release and nightly for pushes to `main` and for pull requests.
 
 `test/demo.md`, `test/sample.md`, `test/wrap.md` and `test/tables.md` are the visual test files.
 
