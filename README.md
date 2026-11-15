@@ -107,6 +107,7 @@ require('mdrender').setup({
     scale = 2,                  -- supersampling for sharp images
     cell = { 9, 20 },           -- cell size in pixels when the terminal does not report it
     macros = {},                -- MathJax macros, e.g. { reals = '\\mathbf{R}' }
+    cache_mb = 32,              -- image cache cap; past it, the least recently used images go
   },
 })
 ```

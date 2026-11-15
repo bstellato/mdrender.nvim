@@ -90,6 +90,61 @@ return {
     H.eq(before + 1, H.transmits(), 'images sent')
   end },
 
+  { 'past the cache cap, the oldest images off screen are dropped', function()
+    H.math.clear()
+    H.m.config.math.cache_mb = 8000 / 2 ^ 20 -- a few inline images
+    local buf = H.open({ '$a_{1}$', '', 'end' }, 2)
+    for i = 2, 12 do
+      api.nvim_buf_set_lines(buf, 0, 1, false, { ('$a_{%d}$'):format(i) })
+      H.settle(buf)
+    end
+    H.ok(H.math.cache_bytes() <= 8000, 'cache within the cap: ' .. H.math.cache_bytes())
+    H.ok(H.image(0), 'the formula on screen is drawn')
+    local deletes = 0
+    for _, s in ipairs(H.sent) do
+      deletes = deletes + (s:find('a=d,d=I', 1, true) and 1 or 0)
+    end
+    H.ok(deletes > 0, 'dropped images deleted from the terminal')
+    -- A dropped formula is rendered again when it comes back.
+    local before = H.transmits()
+    api.nvim_buf_set_lines(buf, 0, 1, false, { '$a_{1}$' })
+    H.settle(buf)
+    H.eq(before + 1, H.transmits(), 'dropped formula sent again')
+    H.ok(H.image(0), 'dropped formula drawn again')
+  end },
+
+  { 'images on screen stay past the cache cap', function()
+    H.math.clear()
+    H.m.config.math.cache_mb = 1000 / 2 ^ 20 -- less than the formulas below
+    local lines = {}
+    for i = 1, 10 do
+      table.insert(lines, ('$b_{%d}$'):format(i))
+      table.insert(lines, '')
+    end
+    table.insert(lines, 'end')
+    local buf = H.open(lines, #lines - 1)
+    H.ok(H.math.cache_bytes() > 1000, 'over the cap: ' .. H.math.cache_bytes())
+    for i = 0, 9 do
+      H.ok(H.image(2 * i), 'image on row ' .. 2 * i)
+    end
+    -- A new formula goes over the cap again; the ones on screen are not dropped.
+    local before = H.transmits()
+    H.cursor(1)
+    api.nvim_buf_set_lines(buf, -2, -1, false, { '$c_{1}$' })
+    H.settle(buf)
+    H.eq(before + 1, H.transmits(), 'only the new formula was sent')
+    for i = 0, 10 do
+      H.ok(H.image(2 * i), 'image on row ' .. 2 * i .. ' after the new formula')
+    end
+  end },
+
+  { 'clearing the cache frees every byte', function()
+    H.open(doc, last)
+    H.ok(H.math.cache_bytes() > 0, 'cache in use')
+    H.math.clear()
+    H.eq(0, H.math.cache_bytes(), 'bytes after clear')
+  end },
+
   { 'a colour scheme change renders the images again', function()
     H.open(doc, last)
     local before = H.transmits()

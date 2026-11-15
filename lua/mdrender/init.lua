@@ -41,6 +41,7 @@ M.config = {
     -- is wider, math is drawn slightly smaller.
     cell = { 9, 20 },
     macros = {}, -- MathJax macros, e.g. { reals = '\\mathbf{R}' }
+    cache_mb = 32, -- image cache cap; past it, the least recently used images are dropped
   },
 }
 
@@ -1021,6 +1022,28 @@ function M.setup(opts)
   M.config = vim.tbl_deep_extend('force', M.config, vim.g.mdrender or {}, opts or {})
   set_highlights()
   update_cell()
+  mathr.in_use = function()
+    local ids = {}
+    local function scan(chunks)
+      for _, c in ipairs(chunks or {}) do
+        local id = type(c[2]) == 'string' and c[2]:match('^MdRenderImg(%d+)$')
+        if id then
+          ids[tonumber(id)] = true
+        end
+      end
+    end
+    for buf in pairs(state) do
+      if api.nvim_buf_is_valid(buf) then
+        for _, m in ipairs(api.nvim_buf_get_extmarks(buf, ns, 0, -1, { details = true })) do
+          scan(m[4].virt_text)
+          for _, l in ipairs(m[4].virt_lines or {}) do
+            scan(l)
+          end
+        end
+      end
+    end
+    return ids
+  end
   mathr.on_update = function()
     render_all(20)
   end
