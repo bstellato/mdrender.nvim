@@ -1,0 +1,41 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: nvim ${{ matrix.nvim }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # v0.11.0 is the oldest supported version (see the README).
+        nvim: [v0.11.0, stable, nightly]
+    continue-on-error: ${{ matrix.nvim == 'nightly' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: node/package-lock.json
+
+      - name: Install the math renderer
+        run: npm ci --no-audit --no-fund
+        working-directory: node
+
+      - uses: rhysd/action-setup-vim@v1
+        with:
+          neovim: true
+          version: ${{ matrix.nvim }}
+
+      - run: nvim --version
+
+      - name: Run the tests
+        run: ./test/run.sh

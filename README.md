@@ -203,12 +203,20 @@ nvim --headless --clean -n --cmd 'set rtp+=.' /tmp/large.md -c 'luafile test/ben
 
 ## Development
 
+Run the tests (the math tests need `cd node && npm install` first):
+
 ```sh
-nvim --headless --clean --cmd 'set rtp+=.' test/sample.md -c 'luafile test/headless.lua'
+./test/run.sh
+MDRENDER_TEST=perf ./test/run.sh   # only the tests whose name matches a Lua pattern
 ```
 
-This smoke test prints the number of decorations and transmitted images and any error
-messages. `test/demo.md`, `test/sample.md`, `test/wrap.md` and `test/tables.md` are the visual test files.
+The suite covers the Markdown decorations, math images and their cache, the settings and
+the command, and large files. The large-file tests count decorations and rendered formulas,
+so a change that brings back whole-file work fails on any machine; one loose timing check
+(`MDRENDER_PERF_MS`, 25 ms by default) catches the rest. GitHub Actions runs the suite on
+Neovim 0.11.0, the latest release and nightly for every push and pull request.
+
+`test/demo.md`, `test/sample.md`, `test/wrap.md` and `test/tables.md` are the visual test files.
 
 Layout:
 
@@ -220,6 +228,8 @@ Layout:
 | `lua/mdrender/code.lua` | Code block highlighting from Neovim's syntax files |
 | `node/render.js` | TeX to PNG with MathJax and resvg |
 | `scripts/gen_diacritics.py` | Regenerates the placeholder table from the Unicode database |
+| `test/run.lua`, `test/spec_*.lua` | Test runner and tests |
+| `test/gen_large.lua`, `test/bench.lua` | Large test file and redraw timings |
 
 ## License
 
