@@ -177,6 +177,20 @@ and are placed with Unicode placeholders so they scroll with the text.
 Supported TeX is what MathJax supports: AMS math, `\text`, `\mathbf`, `\boldsymbol`,
 `mathtools`, `cancel`, `braket`, colours, and your own macros through `math.macros`.
 
+## Large files
+
+Only the part of the file near the window is decorated: the lines on screen and one screen
+above and below, plus the whole of any table, code block or list that reaches into them.
+Only formulas there are rendered. Moving the cursor or scrolling costs about 2 ms on a
+21,000-line file with 9,000 formulas, and a jump such as `G` is decorated before it is shown.
+A formula seen for the first time shows its source until its image arrives, a few
+milliseconds later. To measure it yourself:
+
+```sh
+nvim -l test/gen_large.lua 400 > /tmp/large.md
+nvim --headless --clean -n --cmd 'set rtp+=.' /tmp/large.md -c 'luafile test/bench.lua'
+```
+
 ## Limits
 
 - **Wrapping follows the raw source.** Neovim counts hidden text when it wraps a line, so a line
@@ -192,12 +206,22 @@ Supported TeX is what MathJax supports: AMS math, `\text`, `\mathbf`, `\boldsymb
 
 ## Development
 
+Run the tests (the math tests need `cd node && npm install` first):
+
 ```sh
-nvim --headless --clean --cmd 'set rtp+=.' test/sample.md -c 'luafile test/headless.lua'
+./test/run.sh
+MDRENDER_TEST=perf ./test/run.sh   # only the tests whose name matches a Lua pattern
 ```
 
-This smoke test prints the number of decorations and transmitted images and any error
-messages. `test/demo.md`, `test/sample.md`, `test/wrap.md` and `test/tables.md` are the visual test files.
+The suite covers the Markdown decorations, math images and their cache, the settings and
+the command, large files, and the paths real use takes: autocommands, timers, the
+screen-update hook and the asynchronous parse. A test also fails when any error is reported
+while it runs. The large-file tests count decorations and rendered formulas, so a change
+that brings back whole-file work fails on any machine; one loose timing check
+(`MDRENDER_PERF_MS`, 25 ms by default) catches the rest. GitHub Actions runs the suite on
+Neovim 0.11.0, the latest release and nightly for pushes to `main` and for pull requests.
+
+`test/demo.md`, `test/sample.md`, `test/wrap.md` and `test/tables.md` are the visual test files.
 
 Layout:
 
@@ -209,6 +233,8 @@ Layout:
 | `lua/mdrender/code.lua` | Code block highlighting from Neovim's syntax files |
 | `node/render.js` | TeX to PNG with MathJax and resvg |
 | `scripts/gen_diacritics.py` | Regenerates the placeholder table from the Unicode database |
+| `test/run.lua`, `test/spec_*.lua` | Test runner and tests |
+| `test/gen_large.lua`, `test/bench.lua` | Large test file and redraw timings |
 
 ## License
 

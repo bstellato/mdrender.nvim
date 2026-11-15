@@ -30,25 +30,35 @@ local function syntax_name(label)
   return nil
 end
 
+-- label -> true, or the time of a lookup that found no parser. A parser can appear
+-- later (a lazy-loaded plugin, :TSInstall), so a miss is looked up again after a while.
+local parsers = {}
+local RECHECK_MS = 5000
+
 --- True when treesitter can highlight this fence label itself (as an injection).
 function M.has_parser(label)
-  local lang = label:lower():match('^[%w_+#-]+')
-  if not lang then
-    return false
+  local known = parsers[label]
+  if known == true or (known and vim.uv.now() - known < RECHECK_MS) then
+    return known == true
   end
-  local names = { lang, vim.treesitter.language.get_lang(lang), vim.filetype.match({ filename = 'x.' .. lang }) }
+  local lang = label:lower():match('^[%w_+#-]+')
+  local names = lang and { lang, vim.treesitter.language.get_lang(lang), vim.filetype.match({ filename = 'x.' .. lang }) } or {}
   for _, name in pairs(names) do
     local ok, added = pcall(vim.treesitter.language.add, name)
     if ok and added then
+      parsers[label] = true
       return true
     end
   end
+  parsers[label] = vim.uv.now()
   return false
 end
 
 --- Highlight spans for the code lines: a list of {row, col_start, col_end, group},
 --- with 0-based rows relative to the first line and byte columns.
-function M.highlight(label, lines)
+--- With `cached_only`, returns nil instead of computing spans that are not cached
+--- (during a screen update, where the scratch buffer cannot be used).
+function M.highlight(label, lines, cached_only)
   local syn = syntax_name(label)
   if not syn or #lines == 0 or #lines > MAX_LINES then
     return {}
@@ -56,6 +66,9 @@ function M.highlight(label, lines)
   local key = syn .. '\0' .. table.concat(lines, '\n')
   if cache[key] then
     return cache[key]
+  end
+  if cached_only then
+    return nil
   end
   if not (scratch and api.nvim_buf_is_valid(scratch)) then
     scratch = api.nvim_create_buf(false, true)

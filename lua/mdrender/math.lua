@@ -144,6 +144,11 @@ function M.get(opts)
   return cache[key]
 end
 
+-- Formulas sent to the renderer and not answered yet (for the tests).
+function M.pending_count()
+  return vim.tbl_count(pending)
+end
+
 --- Recreate the highlight groups that carry the image ids (after `:highlight clear`).
 function M.restore_highlights()
   for _, e in pairs(cache) do

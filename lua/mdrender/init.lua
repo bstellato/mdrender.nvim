@@ -157,7 +157,37 @@ local function last_row(node)
   return r1, (c2 == 0 and r2 > r1) and r2 - 1 or r2
 end
 
-local function render(buf)
+-- Rows to decorate: what the buffer's windows show, plus a screen of margin on each
+-- side so that short scrolls reveal text that is already styled. A list of
+-- non-overlapping {first, last} pairs (0-based, end-exclusive), in order.
+local function visible_ranges(buf)
+  local ranges = {}
+  for _, win in ipairs(vim.fn.win_findbuf(buf)) do
+    local info = vim.fn.getwininfo(win)[1]
+    -- During a redraw botline can still describe the old view; topline is current.
+    local bot = math.max(info.botline, info.topline - 1 + info.height)
+    table.insert(ranges, { math.max(0, info.topline - 1 - info.height), bot + info.height })
+  end
+  table.sort(ranges, function(a, b)
+    return a[1] < b[1]
+  end)
+  local merged = {}
+  for _, r in ipairs(ranges) do
+    local last = merged[#merged]
+    if last and r[1] <= last[2] then
+      last[2] = math.max(last[2], r[2])
+    else
+      table.insert(merged, r)
+    end
+  end
+  return merged
+end
+
+-- Decorate the rows in `ranges`, once the parser has parsed them. In a screen update
+-- (`in_redraw`) code that needs a scratch buffer is skipped; then it returns true, and
+-- the caller draws again after the update.
+local function draw(buf, parser, ranges, in_redraw)
+  local incomplete = false
   if not api.nvim_buf_is_valid(buf) or not state[buf] then
     return
   end
@@ -166,11 +196,28 @@ local function render(buf)
   if win == -1 then
     return
   end
-  local ok, parser = pcall(vim.treesitter.get_parser, buf, 'markdown')
-  if not ok or not parser then
-    return
+  state[buf].drawn = ranges
+  -- Captures of a tree within the ranges. Trees outside them are skipped (after a
+  -- scroll through the file there is one inline tree per paragraph parsed so far),
+  -- and a node that spans two ranges is returned once.
+  local function captures(query, tree)
+    local root = tree:root()
+    local t1, _, t2 = root:range()
+    local seen = {}
+    return coroutine.wrap(function()
+      for _, r in ipairs(ranges) do
+        if t1 < r[2] and t2 >= r[1] then
+          for id, node in query:iter_captures(root, buf, r[1], r[2]) do
+            local key = id .. ':' .. node:id()
+            if not seen[key] then
+              seen[key] = true
+              coroutine.yield(id, node)
+            end
+          end
+        end
+      end
+    end)
   end
-  parser:parse(true)
 
   -- Some themes clear every highlight group without firing ColorScheme. Notice it
   -- here and define the groups again.
@@ -179,7 +226,15 @@ local function render(buf)
     mathr.restore_highlights()
   end
 
-  local lines = api.nvim_buf_get_lines(buf, 0, -1, false)
+  -- Lines are read on demand: only the decorated ones are ever needed.
+  local nlines = api.nvim_buf_line_count(buf)
+  local lines = setmetatable({}, {
+    __index = function(t, i)
+      local line = api.nvim_buf_get_lines(buf, i - 1, i, false)[1]
+      rawset(t, i, line)
+      return line
+    end,
+  })
   local cur = api.nvim_win_get_cursor(win)[1] - 1
   local info = vim.fn.getwininfo(win)[1]
   local win_width = math.max(20, info.width - info.textoff)
@@ -293,7 +348,7 @@ local function render(buf)
     if ltree:lang() ~= 'markdown_inline' then
       return
     end
-    for id, node in q.inline:iter_captures(tree:root(), buf) do
+    for id, node in captures(q.inline, tree) do
       local name = q.inline.captures[id]
       local r1, c1, r2, c2 = node:range()
       if name == 'code' then
@@ -461,7 +516,7 @@ local function render(buf)
     end
     -- The drawn table hangs off a neighbouring line; without one, leave the source.
     local anchor, above
-    if r2 + 1 < #lines then
+    if r2 + 1 < nlines then
       anchor, above = r2 + 1, true
     elseif r1 > 0 then
       anchor, above = r1 - 1, false
@@ -609,7 +664,7 @@ local function render(buf)
     if ltree:lang() ~= 'markdown' then
       return
     end
-    for id, node in q.block:iter_captures(tree:root(), buf) do
+    for id, node in captures(q.block, tree) do
       local name = q.block.captures[id]
       local r1, c1, _, c2 = node:range()
       local line = lines[r1 + 1] or ''
@@ -661,7 +716,9 @@ local function render(buf)
             for row = r1 + 1, r2 - 1 do
               body[#body + 1] = lines[row + 1]:sub(c1 + 1)
             end
-            for _, span in ipairs(code.highlight(lang, body)) do
+            local spans = code.highlight(lang, body, in_redraw)
+            incomplete = incomplete or spans == nil
+            for _, span in ipairs(spans or {}) do
               mark(r1 + 1 + span[1], c1 + span[2], { end_col = c1 + span[3], hl_group = span[4], priority = 110 })
             end
           end
@@ -708,7 +765,75 @@ local function render(buf)
       end
     end
   end)
+  return incomplete
 end
+
+-- Parse the visible rows and draw them. The parse is asynchronous, as in Neovim's
+-- highlighter: when parsing the new text takes longer than a slice, the call returns
+-- and the drawing happens later, with the old decorations shown meanwhile. (After an
+-- edit most of the time goes to Neovim's injection scan, which does not yield.)
+local function render(buf, sync)
+  local st = state[buf]
+  if not api.nvim_buf_is_valid(buf) or not st then
+    return
+  end
+  local ok, parser = pcall(vim.treesitter.get_parser, buf, 'markdown')
+  if not ok or not parser then
+    return
+  end
+  local ranges = visible_ranges(buf)
+  if #ranges == 0 then
+    api.nvim_buf_clear_namespace(buf, ns, 0, -1)
+    return
+  end
+  -- A render that finishes after a newer one has started draws nothing: its view is
+  -- out of date.
+  st.gen = (st.gen or 0) + 1
+  local gen = st.gen
+  if sync then
+    -- Within a screen update the rows must be ready before they are drawn.
+    for _, r in ipairs(ranges) do
+      parser:parse({ r[1], 0, r[2], 0 })
+    end
+    if draw(buf, parser, ranges, true) then
+      vim.schedule(function()
+        render(buf)
+      end)
+    end
+    return
+  end
+  -- One range at a time: Neovim 0.11 does not take a list of ranges.
+  local i = 0
+  local function step(err)
+    if state[buf] ~= st or st.gen ~= gen then
+      return
+    end
+    if err then
+      -- The parse timed out ('redrawtime'): keep the decorations already shown.
+      return
+    end
+    i = i + 1
+    if i > #ranges then
+      draw(buf, parser, ranges)
+    else
+      parser:parse({ ranges[i][1], 0, ranges[i][2], 0 }, step)
+    end
+  end
+  step()
+end
+
+-- True when the rows top..bot (0-based, inclusive) are inside the decorated ranges.
+local function covered(st, top, bot)
+  for _, r in ipairs(st.drawn or {}) do
+    if r[1] <= top and bot < r[2] then
+      return true
+    end
+  end
+  return false
+end
+
+-- Hooks for the tests (test/run.lua) and test/bench.lua, not part of the API.
+M._render = render
 
 local function schedule(buf, ms)
   local st = state[buf]
@@ -923,7 +1048,23 @@ function M.setup(opts)
   api.nvim_create_autocmd('WinScrolled', {
     group = group,
     callback = function()
-      render_all(30)
+      render_all(5)
+    end,
+  })
+  -- A jump past the decorated rows (G, a search, 5000gg) is drawn within the same
+  -- screen update, before the rows show: otherwise one frame shows raw Markdown.
+  api.nvim_set_decoration_provider(ns, {
+    on_win = function(_, _, buf, top, bot)
+      local st = state[buf]
+      if st and not covered(st, top, bot) then
+        -- Should anything fail inside the screen update, draw right after it instead.
+        if not pcall(render, buf, true) then
+          vim.schedule(function()
+            render(buf)
+          end)
+        end
+      end
+      return false
     end,
   })
   api.nvim_create_autocmd({ 'VimResized', 'WinResized' }, {
