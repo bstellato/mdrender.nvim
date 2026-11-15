@@ -1,5 +1,6 @@
 -- Math images: a persistent Node process turns TeX into PNGs (MathJax + resvg),
--- cached by formula so each one is rendered and transmitted once.
+-- cached by formula so each one is rendered and transmitted once. The cache is capped
+-- (math.cache_mb): past the cap, the least recently used images not on screen are dropped.
 local M = {}
 
 local kitty = require('mdrender.kitty')
@@ -9,10 +10,25 @@ local node_dir = root .. '/node'
 
 local job, buffer = nil, ''
 local pending = {} -- request id -> cache key
-local cache = {} -- key -> {state, id, cols, rows, png, err}
+local cache = {} -- key -> {state, id, cols, rows, png, err, used, bytes, answered}
 local next_req, next_img = 0, 0x4D0000
+local clock, total, limit = 0, 0, math.huge -- lookups so far, cached bytes, cap in bytes
+-- Image ids are reused, since Neovim cannot delete the highlight group of each one.
+-- Ids of dropped images are free at once (no extmark shows them). After a clear, the
+-- old extmarks stay until the next redraw, so those ids wait GRACE_MS (retired).
+local free, retired, retired_until = {}, {}, 0
+-- An answer is drawn by the redraw that follows it. Until then it is not on screen
+-- but must stay; after GRACE_MS it can go like any other entry.
+local GRACE_MS = 1000
+M._grace_ms = function(ms) -- for the tests
+  GRACE_MS = ms
+end
 local building = false
 M.on_update = function() end
+--- Image ids drawn in some buffer right now; these are never dropped. Set by init.lua.
+M.in_use = function()
+  return {}
+end
 
 local function installed()
   return vim.uv.fs_stat(node_dir .. '/node_modules/mathjax-full') ~= nil
@@ -43,6 +59,55 @@ function M.build(cb)
   end)
 end
 
+local function new_id()
+  if #retired > 0 and vim.uv.now() >= retired_until then
+    vim.list_extend(free, retired)
+    retired = {}
+  end
+  if #free > 0 then
+    return table.remove(free)
+  end
+  next_img = next_img + 1
+  return next_img
+end
+
+local function forget(key, ids)
+  local e = cache[key]
+  if e.state == 'ready' then
+    kitty.delete(e.id)
+    vim.api.nvim_set_hl(0, e.hl, {})
+    table.insert(ids, e.id)
+  end
+  total = total - (e.bytes or 0)
+  cache[key] = nil
+end
+
+-- Past the cap, drop the least recently used entries down to 3/4 of it. Pending
+-- entries, answers not drawn yet and images on screen stay.
+local function evict()
+  if total <= limit then
+    return
+  end
+  local shown = M.in_use()
+  local now = vim.uv.now()
+  local old = {}
+  for key, e in pairs(cache) do
+    local new = e.answered and now - e.answered < GRACE_MS
+    if e.bytes and not new and not (e.id and shown[e.id]) then
+      table.insert(old, key)
+    end
+  end
+  table.sort(old, function(a, b)
+    return cache[a].used < cache[b].used
+  end)
+  for _, key in ipairs(old) do
+    if total <= 0.75 * limit then
+      break
+    end
+    forget(key, free)
+  end
+end
+
 local function on_reply(line)
   local ok, reply = pcall(vim.json.decode, line)
   if not ok or type(reply) ~= 'table' then
@@ -51,12 +116,11 @@ local function on_reply(line)
   local key = pending[reply.id]
   pending[reply.id] = nil
   local entry = key and cache[key]
-  if not entry then
+  if not entry or entry.state ~= 'pending' then
     return
   end
   if reply.ok then
-    next_img = next_img + 1
-    entry.state, entry.id = 'ready', next_img
+    entry.state, entry.id = 'ready', new_id()
     entry.cols, entry.rows, entry.png = reply.cols, reply.rows, reply.png
     entry.hl = kitty.hl(entry.id)
     entry.lines = kitty.placeholder_rows(entry.cols, entry.rows)
@@ -64,6 +128,9 @@ local function on_reply(line)
   else
     entry.state, entry.err = 'error', reply.error or 'render error'
   end
+  entry.bytes, entry.answered = #key + #(entry.png or entry.err), vim.uv.now()
+  total = total + entry.bytes
+  evict()
   M.on_update()
 end
 
@@ -114,15 +181,18 @@ function M.get(opts)
     opts.tex, opts.display and 'D' or 'I', opts.fg, opts.cw, opts.ch,
     opts.display and opts.max_cols or 0, opts.min_rows or 0,
   }, '\0')
+  limit = opts.cfg.cache_mb * 1024 * 1024
+  clock = clock + 1
   local entry = cache[key]
   if entry then
+    entry.used, entry.answered = clock, nil
     return entry
   end
   if not start() then
     return nil
   end
   next_req = next_req + 1
-  cache[key] = { state = 'pending' }
+  cache[key] = { state = 'pending', used = clock }
   pending[next_req] = key
   local cfg = opts.cfg
   job:write(vim.json.encode({
@@ -149,6 +219,11 @@ function M.pending_count()
   return vim.tbl_count(pending)
 end
 
+-- Bytes held by the cache (for the tests).
+function M.cache_bytes()
+  return total
+end
+
 --- Recreate the highlight groups that carry the image ids (after `:highlight clear`).
 function M.restore_highlights()
   for _, e in pairs(cache) do
@@ -169,12 +244,16 @@ end
 
 --- Forget all images (colours or cell size changed).
 function M.clear()
-  for key, e in pairs(cache) do
-    if e.state == 'ready' then
-      kitty.delete(e.id)
-    end
-    cache[key] = nil
+  for key in pairs(cache) do
+    forget(key, retired)
   end
+  retired_until = vim.uv.now() + GRACE_MS
+  pending = {} -- late answers are for the old settings
+end
+
+-- Image ids handed out so far (for the tests).
+function M.ids_used()
+  return next_img - 0x4D0000
 end
 
 function M.stop()

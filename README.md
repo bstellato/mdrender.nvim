@@ -107,6 +107,7 @@ require('mdrender').setup({
     scale = 2,                  -- supersampling for sharp images
     cell = { 9, 20 },           -- cell size in pixels when the terminal does not report it
     macros = {},                -- MathJax macros, e.g. { reals = '\\mathbf{R}' }
+    cache_mb = 32,              -- image cache size in MiB; past it, old images off screen are dropped
   },
 })
 ```
@@ -142,6 +143,10 @@ What each font-related knob does:
 - **`math.cell`**: only the width-to-height ratio matters, and only when the terminal does not
   report its cell size (the Herdr app does not). If inline math has side margins, raise the
   first number. If math looks slightly small, lower it.
+- **`math.cache_mb`**: images are kept in memory and in the terminal, so a formula is rendered
+  once per session. Past this size (in MiB, counting the PNGs only), the least recently used
+  images not on screen are dropped and rendered again if they come back. A short inline
+  formula takes about 2 KB. Set it to `math.huge` for no limit.
 - **`bullets`, `tasks`**: a terminal cannot scale one character, so "larger" means choosing a
   bigger glyph. How big a glyph looks depends on your font.
 
