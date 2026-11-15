@@ -180,12 +180,11 @@ return {
 
   { 'redraws stay cheap after scrolling through the whole file', function()
     local buf = large()
-    local n = api.nvim_buf_line_count(buf)
-    for row = 1, n, 80 do
-      api.nvim_win_set_cursor(0, { row, 0 })
-      vim.cmd('normal! zt')
-      vim.treesitter.get_parser(buf, 'markdown'):parse({ row - 1, 0, row + 80, 0 })
-    end
+    -- Parsing the whole file leaves an inline tree for every paragraph, as a scroll
+    -- through the file does.
+    local parser = vim.treesitter.get_parser(buf, 'markdown')
+    parser:parse(true)
+    H.ok(vim.tbl_count(parser:children().markdown_inline:trees()) > 5000, 'inline trees for the whole file')
     api.nvim_win_set_cursor(0, { 10001, 0 })
     vim.cmd('normal! zz')
     H.settle(buf)
