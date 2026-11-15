@@ -157,7 +157,32 @@ local function last_row(node)
   return r1, (c2 == 0 and r2 > r1) and r2 - 1 or r2
 end
 
-local function render(buf)
+-- Rows to decorate: what the buffer's windows show, plus a screen of margin on each
+-- side so that short scrolls reveal text that is already styled. A list of
+-- non-overlapping {first, last} pairs (0-based, end-exclusive), in order.
+local function visible_ranges(buf)
+  local ranges = {}
+  for _, win in ipairs(vim.fn.win_findbuf(buf)) do
+    local info = vim.fn.getwininfo(win)[1]
+    table.insert(ranges, { math.max(0, info.topline - 1 - info.height), info.botline + info.height })
+  end
+  table.sort(ranges, function(a, b)
+    return a[1] < b[1]
+  end)
+  local merged = {}
+  for _, r in ipairs(ranges) do
+    local last = merged[#merged]
+    if last and r[1] <= last[2] then
+      last[2] = math.max(last[2], r[2])
+    else
+      table.insert(merged, r)
+    end
+  end
+  return merged
+end
+
+-- Decorate the rows in `ranges`, once the parser has parsed them.
+local function draw(buf, parser, ranges)
   if not api.nvim_buf_is_valid(buf) or not state[buf] then
     return
   end
@@ -166,11 +191,22 @@ local function render(buf)
   if win == -1 then
     return
   end
-  local ok, parser = pcall(vim.treesitter.get_parser, buf, 'markdown')
-  if not ok or not parser then
-    return
+  -- Each node is drawn once, even when it spans two ranges.
+  local seen = {}
+  local function captures(query, tree)
+    local co = coroutine.wrap(function()
+      for _, r in ipairs(ranges) do
+        for id, node in query:iter_captures(tree:root(), buf, r[1], r[2]) do
+          local key = id .. ':' .. node:id()
+          if not seen[key] then
+            seen[key] = true
+            coroutine.yield(id, node)
+          end
+        end
+      end
+    end)
+    return co
   end
-  parser:parse(true)
 
   -- Some themes clear every highlight group without firing ColorScheme. Notice it
   -- here and define the groups again.
@@ -179,7 +215,15 @@ local function render(buf)
     mathr.restore_highlights()
   end
 
-  local lines = api.nvim_buf_get_lines(buf, 0, -1, false)
+  -- Lines are read on demand: only the decorated ones are ever needed.
+  local nlines = api.nvim_buf_line_count(buf)
+  local lines = setmetatable({}, {
+    __index = function(t, i)
+      local line = api.nvim_buf_get_lines(buf, i - 1, i, false)[1]
+      rawset(t, i, line)
+      return line
+    end,
+  })
   local cur = api.nvim_win_get_cursor(win)[1] - 1
   local info = vim.fn.getwininfo(win)[1]
   local win_width = math.max(20, info.width - info.textoff)
@@ -293,7 +337,7 @@ local function render(buf)
     if ltree:lang() ~= 'markdown_inline' then
       return
     end
-    for id, node in q.inline:iter_captures(tree:root(), buf) do
+    for id, node in captures(q.inline, tree) do
       local name = q.inline.captures[id]
       local r1, c1, r2, c2 = node:range()
       if name == 'code' then
@@ -461,7 +505,7 @@ local function render(buf)
     end
     -- The drawn table hangs off a neighbouring line; without one, leave the source.
     local anchor, above
-    if r2 + 1 < #lines then
+    if r2 + 1 < nlines then
       anchor, above = r2 + 1, true
     elseif r1 > 0 then
       anchor, above = r1 - 1, false
@@ -609,7 +653,7 @@ local function render(buf)
     if ltree:lang() ~= 'markdown' then
       return
     end
-    for id, node in q.block:iter_captures(tree:root(), buf) do
+    for id, node in captures(q.block, tree) do
       local name = q.block.captures[id]
       local r1, c1, _, c2 = node:range()
       local line = lines[r1 + 1] or ''
@@ -709,6 +753,34 @@ local function render(buf)
     end
   end)
 end
+
+-- Parse the visible rows and draw them. After an edit, re-parsing a large file can
+-- take longer than a frame, so the parse runs in slices between key presses, like
+-- Neovim's own highlighter, and the old decorations stay until it is done.
+local function render(buf)
+  if not api.nvim_buf_is_valid(buf) or not state[buf] then
+    return
+  end
+  local ok, parser = pcall(vim.treesitter.get_parser, buf, 'markdown')
+  if not ok or not parser then
+    return
+  end
+  local ranges = visible_ranges(buf)
+  if #ranges == 0 then
+    api.nvim_buf_clear_namespace(buf, ns, 0, -1)
+    return
+  end
+  local parse_ranges = {}
+  for i, r in ipairs(ranges) do
+    parse_ranges[i] = { r[1], 0, r[2], 0 }
+  end
+  -- On a timeout, draw from the trees parsed so far rather than leave stale marks.
+  parser:parse(parse_ranges, function()
+    draw(buf, parser, ranges)
+  end)
+end
+
+M._render = render -- for test/bench.lua
 
 local function schedule(buf, ms)
   local st = state[buf]
@@ -923,7 +995,7 @@ function M.setup(opts)
   api.nvim_create_autocmd('WinScrolled', {
     group = group,
     callback = function()
-      render_all(30)
+      render_all(5)
     end,
   })
   api.nvim_create_autocmd({ 'VimResized', 'WinResized' }, {

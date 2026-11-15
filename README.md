@@ -177,6 +177,17 @@ and are placed with Unicode placeholders so they scroll with the text.
 Supported TeX is what MathJax supports: AMS math, `\text`, `\mathbf`, `\boldsymbol`,
 `mathtools`, `cancel`, `braket`, colours, and your own macros through `math.macros`.
 
+## Large files
+
+Only the lines on screen, plus one screen above and below, are decorated, and only their
+formulas are rendered. Moving the cursor or scrolling costs about 2 ms on a 21,000-line file
+with 9,000 formulas. To measure it yourself:
+
+```sh
+nvim -l test/gen_large.lua 400 > /tmp/large.md
+nvim --headless --clean -n --cmd 'set rtp+=.' /tmp/large.md -c 'luafile test/bench.lua'
+```
+
 ## Limits
 
 - **Wrapping follows the raw source.** Neovim counts hidden text when it wraps a line, so a line

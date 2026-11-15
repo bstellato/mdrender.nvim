@@ -30,20 +30,23 @@ local function syntax_name(label)
   return nil
 end
 
+local parsers = {} -- label -> boolean
+
 --- True when treesitter can highlight this fence label itself (as an injection).
 function M.has_parser(label)
-  local lang = label:lower():match('^[%w_+#-]+')
-  if not lang then
-    return false
-  end
-  local names = { lang, vim.treesitter.language.get_lang(lang), vim.filetype.match({ filename = 'x.' .. lang }) }
-  for _, name in pairs(names) do
-    local ok, added = pcall(vim.treesitter.language.add, name)
-    if ok and added then
-      return true
+  if parsers[label] == nil then
+    local lang = label:lower():match('^[%w_+#-]+')
+    parsers[label] = false
+    local names = lang and { lang, vim.treesitter.language.get_lang(lang), vim.filetype.match({ filename = 'x.' .. lang }) } or {}
+    for _, name in pairs(names) do
+      local ok, added = pcall(vim.treesitter.language.add, name)
+      if ok and added then
+        parsers[label] = true
+        break
+      end
     end
   end
-  return false
+  return parsers[label]
 end
 
 --- Highlight spans for the code lines: a list of {row, col_start, col_end, group},
