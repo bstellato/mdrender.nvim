@@ -770,14 +770,18 @@ local function render(buf)
     api.nvim_buf_clear_namespace(buf, ns, 0, -1)
     return
   end
-  local parse_ranges = {}
-  for i, r in ipairs(ranges) do
-    parse_ranges[i] = { r[1], 0, r[2], 0 }
+  -- One range at a time: Neovim 0.11 does not take a list of ranges. On a timeout,
+  -- draw from the trees parsed so far rather than leave stale marks.
+  local i = 0
+  local function step()
+    i = i + 1
+    if i > #ranges then
+      draw(buf, parser, ranges)
+    else
+      parser:parse({ ranges[i][1], 0, ranges[i][2], 0 }, step)
+    end
   end
-  -- On a timeout, draw from the trees parsed so far rather than leave stale marks.
-  parser:parse(parse_ranges, function()
-    draw(buf, parser, ranges)
-  end)
+  step()
 end
 
 M._render = render -- for test/bench.lua
