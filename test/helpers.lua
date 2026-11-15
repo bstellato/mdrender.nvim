@@ -28,6 +28,7 @@ function H.reset()
       pcall(api.nvim_buf_delete, buf, { force = true })
     end
   end
+  H.math._grace_ms(1000)
   for k in pairs(H.m.config) do
     H.m.config[k] = vim.deepcopy(defaults[k])
   end

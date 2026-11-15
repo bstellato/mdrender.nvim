@@ -92,6 +92,7 @@ return {
 
   { 'past the cache cap, the oldest images off screen are dropped', function()
     H.math.clear()
+    local sent = #H.sent -- deletes from the clear above do not count
     H.m.config.math.cache_mb = 8000 / 2 ^ 20 -- a few inline images
     local buf = H.open({ '$a_{1}$', '', 'end' }, 2)
     for i = 2, 12 do
@@ -101,8 +102,8 @@ return {
     H.ok(H.math.cache_bytes() <= 8000, 'cache within the cap: ' .. H.math.cache_bytes())
     H.ok(H.image(0), 'the formula on screen is drawn')
     local deletes = 0
-    for _, s in ipairs(H.sent) do
-      deletes = deletes + (s:find('a=d,d=I', 1, true) and 1 or 0)
+    for i = sent + 1, #H.sent do
+      deletes = deletes + (H.sent[i]:find('a=d,d=I', 1, true) and 1 or 0)
     end
     H.ok(deletes > 0, 'dropped images deleted from the terminal')
     -- A dropped formula is rendered again when it comes back.
@@ -136,6 +137,88 @@ return {
     for i = 0, 10 do
       H.ok(H.image(2 * i), 'image on row ' .. 2 * i .. ' after the new formula')
     end
+  end },
+
+  { 'answers that are never drawn do not stay in the cache', function()
+    H.math.clear()
+    H.math._grace_ms(50)
+    H.m.config.math.cache_mb = 8000 / 2 ^ 20
+    -- Request many formulas, then close the buffer before the answers arrive.
+    local lines = {}
+    for i = 1, 20 do
+      table.insert(lines, ('$d_{%d}$ and more'):format(i))
+    end
+    local buf = api.nvim_create_buf(true, false)
+    api.nvim_win_set_buf(0, buf)
+    api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+    vim.bo[buf].filetype = 'markdown'
+    vim.g._ts_force_sync_parsing = true
+    H.m._render(buf)
+    H.ok(H.math.pending_count() >= 10, 'formulas requested: ' .. H.math.pending_count())
+    vim.cmd('enew!')
+    api.nvim_buf_delete(buf, { force = true })
+    vim.wait(20000, function() return H.math.pending_count() == 0 end, 10)
+    H.ok(H.math.cache_bytes() > 8000, 'over the cap: ' .. H.math.cache_bytes())
+    vim.wait(100)
+    -- The next answer drops them.
+    H.open({ '$e_{1}$', '', 'end' }, 2)
+    H.ok(H.math.cache_bytes() <= 8000, 'back within the cap: ' .. H.math.cache_bytes())
+    H.ok(H.image(0), 'new formula drawn')
+  end },
+
+  { 'clearing while formulas are rendering: late answers are ignored', function()
+    H.math.clear()
+    local buf = api.nvim_create_buf(true, false)
+    api.nvim_win_set_buf(0, buf)
+    api.nvim_buf_set_lines(buf, 0, -1, false, { '$f_{1}$ and $f_{2}$', '', 'end' })
+    vim.bo[buf].filetype = 'markdown'
+    api.nvim_win_set_cursor(0, { 3, 0 })
+    vim.g._ts_force_sync_parsing = true
+    H.m._render(buf)
+    H.eq(2, H.math.pending_count(), 'formulas requested')
+    local before = H.transmits()
+    H.math.clear() -- the same formulas are requested again below
+    H.settle(buf)
+    vim.wait(200) -- the first answers arrive too
+    H.eq(before + 2, H.transmits(), 'each formula sent once')
+    H.ok(H.image(0), 'drawn')
+    H.math.clear()
+    H.eq(0, H.math.cache_bytes(), 'bytes after clear')
+  end },
+
+  { 'image ids of dropped images are reused', function()
+    H.math.clear()
+    H.m.config.math.cache_mb = 8000 / 2 ^ 20
+    local buf = H.open({ '$g_{1}$', '', 'end' }, 2)
+    local before = H.math.ids_used()
+    for i = 2, 30 do
+      api.nvim_buf_set_lines(buf, 0, 1, false, { ('$g_{%d}$'):format(i) })
+      H.settle(buf)
+    end
+    H.ok(H.math.ids_used() - before <= 10, 'new ids for 29 images: ' .. (H.math.ids_used() - before))
+    H.ok(H.image(0), 'last formula drawn')
+  end },
+
+  { 'after a clear, ids still on screen are not given to new images', function()
+    local a = H.open({ '$k_{1}$', '', 'end' }, 2)
+    local old = H.image(0, a).virt_text[1][2]
+    H.math.clear() -- a still shows the old image until its next redraw
+    vim.cmd('vsplit')
+    local b = H.open({ '$k_{2}$', '', 'end' }, 2)
+    H.ok(H.image(0, b).virt_text[1][2] ~= old, 'new image got a fresh id')
+  end },
+
+  { 'math in a table cell stays past the cache cap', function()
+    H.math.clear()
+    H.m.config.math.cache_mb = 1000 / 2 ^ 20
+    local buf = H.open({ '| a | b |', '|---|---|', '| $h_{1}$ | $h_{2}$ |', '', 'x', '', 'end' }, 6)
+    H.ok(next(H.math.in_use()), 'table images drawn')
+    local before = H.transmits()
+    H.cursor(5)
+    api.nvim_buf_set_lines(buf, 4, 5, false, { '$h_{3}$' })
+    H.settle(buf)
+    H.cursor(6)
+    H.eq(before + 1, H.transmits(), 'only the new formula was sent')
   end },
 
   { 'clearing the cache frees every byte', function()
