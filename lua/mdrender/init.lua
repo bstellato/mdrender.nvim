@@ -187,6 +187,23 @@ local function visible_ranges(buf)
   return merged
 end
 
+-- Extmarks belong to the buffer, so the layout (wrapping, centring) is made for one
+-- window: the current one when it shows the buffer, else the first one that does, in
+-- any tab page.
+local function layout_win(buf)
+  local cur = api.nvim_get_current_win()
+  if api.nvim_win_get_buf(cur) == buf then
+    return cur
+  end
+  return vim.fn.win_findbuf(buf)[1]
+end
+
+-- Columns of the text area of a window.
+local function text_cols(win)
+  local info = vim.fn.getwininfo(win)[1]
+  return info.width - info.textoff
+end
+
 -- Decorate the rows in `ranges`, once the parser has parsed them. In a screen update
 -- (`in_redraw`) code that needs a scratch buffer is skipped; then it returns true, and
 -- the caller draws again after the update.
@@ -195,12 +212,13 @@ local function draw(buf, parser, ranges, in_redraw)
   if not api.nvim_buf_is_valid(buf) or not state[buf] then
     return
   end
-  local win = vim.fn.bufwinid(buf)
+  local win = layout_win(buf)
   api.nvim_buf_clear_namespace(buf, ns, 0, -1)
-  if win == -1 then
+  if not win then
+    state[buf].drawn = nil
     return
   end
-  state[buf].drawn = ranges
+  state[buf].drawn, state[buf].win, state[buf].cols = ranges, win, text_cols(win)
   -- Captures of a tree within the ranges. Trees outside them are skipped (after a
   -- scroll through the file there is one inline tree per paragraph parsed so far),
   -- and a node that spans two ranges is returned once.
@@ -240,8 +258,7 @@ local function draw(buf, parser, ranges, in_redraw)
     end,
   })
   local cur = api.nvim_win_get_cursor(win)[1] - 1
-  local info = vim.fn.getwininfo(win)[1]
-  local win_width = math.max(20, info.width - info.textoff)
+  local win_width = math.max(20, state[buf].cols)
   local width = math.min(win_width, M.config.max_width)
   local cfg = M.config.math
   local math_on = cfg.enabled and vim.o.termguicolors
@@ -291,7 +308,7 @@ local function draw(buf, parser, ranges, in_redraw)
   -- over it. wrap_cols(row) lists the byte columns where the screen rows after the
   -- first one start (empty when the line fits, or when hidden text does not wrap).
   -- It is computed once per line: the calls below read the line from its start.
-  local text_width = math.max(1, info.width - info.textoff)
+  local text_width = math.max(1, state[buf].cols)
   local cpo_n = vim.o.cpoptions:find('n', 1, true) ~= nil
   local wraps = {}
   local function wrap_cols(row)
@@ -423,8 +440,17 @@ local function draw(buf, parser, ranges, in_redraw)
       -- Without raw wrapping, hiding the source before the break would move the break.
       s = after
     end
+    -- Inline cells wrap like text, cell by cell. When the image does not fit in the rest
+    -- of its screen row, blank cells fill that rest and the image starts the next row.
+    local chunks = { { entry.lines[1], entry.hl } }
+    if raw_wrap and not cpo_n and vim.wo[win].wrap then
+      local rest = text_width - (vim.fn.virtcol({ r1 + 1, c1 + 1 }, 1, win)[1] - 1) % text_width
+      if entry.cols > rest and entry.cols <= text_width then
+        table.insert(chunks, 1, { string.rep(' ', rest) })
+      end
+    end
     mark(r1, c1, { end_row = r2, end_col = c2, conceal = '' })
-    mark(r1, c1, { virt_text = { { entry.lines[1], entry.hl } }, virt_text_pos = 'inline' })
+    mark(r1, c1, { virt_text = chunks, virt_text_pos = 'inline' })
     wraps[r1] = nil -- inline cells move the breaks after them
   end
 
@@ -869,6 +895,7 @@ local function render(buf, sync)
   local ranges = visible_ranges(buf)
   if #ranges == 0 then
     api.nvim_buf_clear_namespace(buf, ns, 0, -1)
+    st.drawn = nil
     return
   end
   -- A render that finishes after a newer one has started draws nothing: its view is
@@ -962,7 +989,7 @@ function M.attach(buf)
   for _, win in ipairs(vim.fn.win_findbuf(buf)) do
     set_window(win)
   end
-  api.nvim_create_autocmd({ 'TextChanged', 'TextChangedI', 'BufWinEnter' }, {
+  api.nvim_create_autocmd({ 'TextChanged', 'TextChangedI', 'BufWinEnter', 'WinEnter' }, {
     group = group, buffer = buf,
     callback = function(ev)
       if ev.event == 'BufWinEnter' then
@@ -1173,14 +1200,21 @@ function M.setup(opts)
       end
       return false
     end,
+    -- No event reports a number, fold or sign column that appears or goes, and the new
+    -- text width is known only once the screen update is done. Draw again after it.
+    on_end = function()
+      for buf, st in pairs(state) do
+        if st.win and api.nvim_win_is_valid(st.win) and text_cols(st.win) ~= st.cols then
+          schedule(buf, 0)
+        end
+      end
+    end,
   })
-  -- Options that change where lines wrap or how wide the text area is.
+  -- Options that change where lines wrap. (A change of the text width is seen by the
+  -- decoration provider above.)
   api.nvim_create_autocmd('OptionSet', {
     group = group,
-    pattern = {
-      'wrap', 'linebreak', 'breakindent', 'breakindentopt', 'showbreak', 'cpoptions',
-      'number', 'relativenumber', 'numberwidth', 'signcolumn', 'foldcolumn',
-    },
+    pattern = { 'wrap', 'linebreak', 'breakindent', 'breakindentopt', 'showbreak', 'cpoptions' },
     callback = function()
       render_all()
     end,

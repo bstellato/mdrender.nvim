@@ -204,6 +204,8 @@ nvim --headless --clean -n --cmd 'set rtp+=.' /tmp/large.md -c 'luafile test/ben
 - **Display math keeps one row per screen row of its source**, so the text below never jumps
   when the cursor enters the block. A formula written over many lines, or on a line long enough
   to wrap, gets a tall block.
+- **The layout is made for one window.** When a buffer shows in two windows of different
+  widths, wrapped and centred math is right in the current one.
 - **Tables are redrawn, so you edit them as source.** Moving the cursor into a table shows its
   raw rows; moving out draws it again. Inside cells, the drawn version understands strong and
   italic text, inline code, links and math, but not other inline markup.
