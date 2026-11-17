@@ -46,6 +46,9 @@ M.config = {
 }
 
 local state = {} -- buf -> {row, timer}
+-- Up to Neovim 0.12, a line wraps by its raw width, hidden text included. From 0.13,
+-- 'wrap' follows the concealed width.
+local raw_wrap = vim.fn.has('nvim-0.13') == 0
 local cell -- {cw, ch}
 local fg_hex = '#000000'
 
@@ -284,38 +287,42 @@ local function draw(buf, parser, ranges, in_redraw)
     })
   end
 
-  -- Neovim wraps a line by its raw width, hidden text included, so a long source line
-  -- takes several screen rows whatever is drawn over it. wrap_cols(row) lists the byte
-  -- columns where the screen rows after the first one start (empty when the line fits).
+  -- Screen row of the character at byte column c of a line. Under raw wrapping it is
+  -- counted within the line (from 1), which also works for lines outside the window.
+  local function screen_row(row, c)
+    if not raw_wrap then
+      return vim.fn.screenpos(win, row + 1, c + 1).row
+    end
+    local vcol = vim.fn.virtcol({ row + 1, c + 1 }, 0, win)
+    return api.nvim_win_text_height(win, { start_row = row, end_row = row, start_vcol = 0, end_vcol = vcol }).all
+  end
+  -- The first byte column in lo..hi on a screen row past `top`, by bisection (hi is on one).
+  local function next_row_col(row, lo, hi, top)
+    while lo < hi do
+      local mid = math.floor((lo + hi) / 2)
+      if screen_row(row, mid) > top then
+        hi = mid
+      else
+        lo = mid + 1
+      end
+    end
+    return lo
+  end
+  -- Under raw wrapping a long source line takes several screen rows whatever is drawn
+  -- over it. wrap_cols(row) lists the byte columns where the screen rows after the
+  -- first one start (empty when the line fits, or when hidden text does not wrap).
   local wraps = {}
   local function wrap_cols(row)
-    if wraps[row] then
-      return wraps[row]
-    end
-    local line = lines[row + 1]
-    -- Screen row (from 1) of the character at byte column c.
-    local function screen_row(c)
-      local vcol = vim.fn.virtcol({ row + 1, c + 1 }, 0, win)
-      return api.nvim_win_text_height(win, { start_row = row, end_row = row, start_vcol = 0, end_vcol = vcol }).all
-    end
-    local cols = {}
-    local n = #line > 0 and screen_row(#line - 1) or 1
-    local lo = 0
-    for j = 2, n do
-      -- The first column on screen row j or later, by bisection.
-      local hi = #line - 1
-      while lo < hi do
-        local mid = math.floor((lo + hi) / 2)
-        if screen_row(mid) >= j then
-          hi = mid
-        else
-          lo = mid + 1
+    if not wraps[row] then
+      local last, cols = #lines[row + 1] - 1, {}
+      if raw_wrap and last >= 0 then
+        for top = 1, screen_row(row, last) - 1 do
+          cols[top] = next_row_col(row, cols[top - 1] or 0, last, top)
         end
       end
-      cols[#cols + 1] = lo
+      wraps[row] = cols
     end
-    wraps[row] = cols
-    return cols
+    return wraps[row]
   end
   -- Screen rows taken by the lines r1..r2.
   local function screen_rows(r1, r2)
@@ -364,41 +371,39 @@ local function draw(buf, parser, ranges, in_redraw)
   -- Inline math. Neovim wraps lines by their raw width: hidden text still counts, and
   -- inline virtual text adds to it. So the image is drawn over the first cells of the
   -- source and only the rest is hidden; the line then wraps exactly like the raw text.
-  -- Overlays do not wrap. When the source straddles a screen-line break, the image goes
-  -- over the first piece of it, on either side of the break, that is wide enough.
-  -- Falls back to inline cells when no piece is: the image is wider than its source,
-  -- or the break leaves two short pieces.
+  -- Overlays do not wrap. When the cells under the image straddle a screen-line break,
+  -- the image goes over the source after the break instead, if that part is wide enough.
+  -- Falls back to inline cells when the image is wider than the source it can cover.
   local function place_inline(r1, c1, r2, c2, entry)
     local line = lines[r1 + 1]
-    if r1 == r2 then
-      local starts = { c1 }
-      for _, c in ipairs(wrap_cols(r1)) do
-        if c > c1 and c < c2 then
-          starts[#starts + 1] = c
-        end
+    local s = r1 == r2 and c1 or nil
+    while s do
+      -- s..b: the source cells under the image.
+      local b, w = s, 0
+      while b < c2 and w < entry.cols do
+        local len = vim.str_utf_end(line, b + 1) + 1
+        w = w + dw(line:sub(b + 1, b + len))
+        b = b + len
       end
-      for k, s in ipairs(starts) do
-        local b, w = s, 0
-        while b < (starts[k + 1] or c2) and w < entry.cols do
-          local len = vim.str_utf_end(line, b + 1) + 1
-          w = w + dw(line:sub(b + 1, b + len))
-          b = b + len
-        end
-        if w == entry.cols then
-          if s > c1 then
-            mark(r1, c1, { end_col = s, conceal = '' })
-          end
-          mark(r1, s, { virt_text = { { entry.lines[1], entry.hl } }, virt_text_pos = 'overlay' })
-          if c2 > b then
-            mark(r1, b, { end_col = c2, conceal = '' })
-          end
-          return
-        end
+      if w ~= entry.cols then
+        break
       end
+      local top = screen_row(r1, s)
+      if screen_row(r1, b - 1) == top then
+        if s > c1 then
+          mark(r1, c1, { end_col = s, conceal = '' })
+        end
+        mark(r1, s, { virt_text = { { entry.lines[1], entry.hl } }, virt_text_pos = 'overlay' })
+        if c2 > b then
+          mark(r1, b, { end_col = c2, conceal = '' })
+        end
+        return
+      end
+      -- Without raw wrapping, hiding the source before the break would move the break.
+      s = raw_wrap and next_row_col(r1, s + 1, b - 1, top) or nil
     end
     mark(r1, c1, { end_row = r2, end_col = c2, conceal = '' })
     mark(r1, c1, { virt_text = { { entry.lines[1], entry.hl } }, virt_text_pos = 'inline' })
-    wraps[r1] = nil -- inline cells move the breaks after them
   end
 
   -- Inline pass: math, inline code, and width corrections.
