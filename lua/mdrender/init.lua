@@ -287,42 +287,52 @@ local function draw(buf, parser, ranges, in_redraw)
     })
   end
 
-  -- Screen row of the character at byte column c of a line. Under raw wrapping it is
-  -- counted within the line (from 1), which also works for lines outside the window.
-  local function screen_row(row, c)
-    if not raw_wrap then
-      return vim.fn.screenpos(win, row + 1, c + 1).row
-    end
-    local vcol = vim.fn.virtcol({ row + 1, c + 1 }, 0, win)
-    return api.nvim_win_text_height(win, { start_row = row, end_row = row, start_vcol = 0, end_vcol = vcol }).all
-  end
-  -- The first byte column in lo..hi on a screen row past `top`, by bisection (hi is on one).
-  local function next_row_col(row, lo, hi, top)
-    while lo < hi do
-      local mid = math.floor((lo + hi) / 2)
-      if screen_row(row, mid) > top then
-        hi = mid
-      else
-        lo = mid + 1
-      end
-    end
-    return lo
-  end
   -- Under raw wrapping a long source line takes several screen rows whatever is drawn
   -- over it. wrap_cols(row) lists the byte columns where the screen rows after the
   -- first one start (empty when the line fits, or when hidden text does not wrap).
+  -- It is computed once per line: the calls below read the line from its start.
+  local text_width = math.max(1, info.width - info.textoff)
+  local cpo_n = vim.o.cpoptions:find('n', 1, true) ~= nil
   local wraps = {}
   local function wrap_cols(row)
-    if not wraps[row] then
-      local last, cols = #lines[row + 1] - 1, {}
-      if raw_wrap and last >= 0 then
-        for top = 1, screen_row(row, last) - 1 do
-          cols[top] = next_row_col(row, cols[top - 1] or 0, last, top)
-        end
-      end
-      wraps[row] = cols
+    if wraps[row] then
+      return wraps[row]
     end
-    return wraps[row]
+    local cols, last = {}, #lines[row + 1] - 1
+    -- Screen row (from 0) of the character at byte column c. Virtual columns count the
+    -- cells that wrapping adds ('linebreak', 'breakindent', 'showbreak'), so the row
+    -- follows from the column. With "n" in 'cpoptions' the rows after the first are
+    -- wider, and Neovim is asked instead (slower).
+    local function at(c)
+      local vcol = vim.fn.virtcol({ row + 1, c + 1 }, 1, win)[1]
+      if cpo_n then
+        return api.nvim_win_text_height(win, { start_row = row, end_row = row, start_vcol = 0, end_vcol = vcol }).all - 1
+      end
+      return math.floor((vcol - 1) / text_width)
+    end
+    if raw_wrap and vim.wo[win].wrap and last >= 0 then
+      for j = 1, at(last) do
+        -- Row j starts at virtual column j * text_width + 1. The character there is the
+        -- first one of the row, unless it starts on the row before (a tab, or cells
+        -- added by wrapping): then bisect for the first column on row j.
+        local c = vim.fn.virtcol2col(win, row + 1, j * text_width + 1) - 1
+        if c < 1 or at(c) ~= j then
+          local lo, hi = cols[j - 1] or 0, last
+          while lo < hi do
+            local mid = math.floor((lo + hi) / 2)
+            if at(mid) >= j then
+              hi = mid
+            else
+              lo = mid + 1
+            end
+          end
+          c = lo
+        end
+        cols[j] = c
+      end
+    end
+    wraps[row] = cols
+    return cols
   end
   -- Screen rows taken by the lines r1..r2.
   local function screen_rows(r1, r2)
@@ -388,8 +398,19 @@ local function draw(buf, parser, ranges, in_redraw)
       if w ~= entry.cols then
         break
       end
-      local top = screen_row(r1, s)
-      if screen_row(r1, b - 1) == top then
+      -- Where the next screen row starts within the cells s..b, if it does.
+      local split, after = false, nil
+      if raw_wrap then
+        for _, c in ipairs(wrap_cols(r1)) do
+          if c > s and c < b then
+            split, after = true, c
+            break
+          end
+        end
+      else
+        split = vim.fn.screenpos(win, r1 + 1, s + 1).row ~= vim.fn.screenpos(win, r1 + 1, b).row
+      end
+      if not split then
         if s > c1 then
           mark(r1, c1, { end_col = s, conceal = '' })
         end
@@ -400,10 +421,11 @@ local function draw(buf, parser, ranges, in_redraw)
         return
       end
       -- Without raw wrapping, hiding the source before the break would move the break.
-      s = raw_wrap and next_row_col(r1, s + 1, b - 1, top) or nil
+      s = after
     end
     mark(r1, c1, { end_row = r2, end_col = c2, conceal = '' })
     mark(r1, c1, { virt_text = { { entry.lines[1], entry.hl } }, virt_text_pos = 'inline' })
+    wraps[r1] = nil -- inline cells move the breaks after them
   end
 
   -- Inline pass: math, inline code, and width corrections.
@@ -1150,6 +1172,17 @@ function M.setup(opts)
         end
       end
       return false
+    end,
+  })
+  -- Options that change where lines wrap or how wide the text area is.
+  api.nvim_create_autocmd('OptionSet', {
+    group = group,
+    pattern = {
+      'wrap', 'linebreak', 'breakindent', 'breakindentopt', 'showbreak', 'cpoptions',
+      'number', 'relativenumber', 'numberwidth', 'signcolumn', 'foldcolumn',
+    },
+    callback = function()
+      render_all()
     end,
   })
   api.nvim_create_autocmd({ 'VimResized', 'WinResized' }, {
