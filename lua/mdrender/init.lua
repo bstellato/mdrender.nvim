@@ -284,25 +284,72 @@ local function draw(buf, parser, ranges, in_redraw)
     })
   end
 
+  -- Neovim wraps a line by its raw width, hidden text included, so a long source line
+  -- takes several screen rows whatever is drawn over it. wrap_cols(row) lists the byte
+  -- columns where the screen rows after the first one start (empty when the line fits).
+  local wraps = {}
+  local function wrap_cols(row)
+    if wraps[row] then
+      return wraps[row]
+    end
+    local line = lines[row + 1]
+    -- Screen row (from 1) of the character at byte column c.
+    local function screen_row(c)
+      local vcol = vim.fn.virtcol({ row + 1, c + 1 }, 0, win)
+      return api.nvim_win_text_height(win, { start_row = row, end_row = row, start_vcol = 0, end_vcol = vcol }).all
+    end
+    local cols = {}
+    local n = #line > 0 and screen_row(#line - 1) or 1
+    local lo = 0
+    for j = 2, n do
+      -- The first column on screen row j or later, by bisection.
+      local hi = #line - 1
+      while lo < hi do
+        local mid = math.floor((lo + hi) / 2)
+        if screen_row(mid) >= j then
+          hi = mid
+        else
+          lo = mid + 1
+        end
+      end
+      cols[#cols + 1] = lo
+    end
+    wraps[row] = cols
+    return cols
+  end
+  -- Screen rows taken by the lines r1..r2.
+  local function screen_rows(r1, r2)
+    local n = 0
+    for row = r1, r2 do
+      n = n + 1 + #wrap_cols(row)
+    end
+    return n
+  end
+
   -- Display math over the source lines r1..r2 (c1: start column on r1, c2: end column on r2).
-  -- The image has at least one row per source line, so every line is replaced in place
-  -- and the line count never changes; extra rows go below as virtual lines.
+  -- The image has at least one row per screen row of the source, so the source is
+  -- replaced in place and the text below never moves; extra rows go below as virtual lines.
   -- Rows are drawn at a fixed window column, not as inline text: hidden source text
   -- still counts when Neovim wraps a line, and inline rows would wrap with it.
   local function place_display(r1, c1, r2, c2, entry)
-    local n = r2 - r1 + 1
+    local n = 0
     local indent = dw(lines[r1 + 1]:sub(1, c1))
     local col = math.max(indent, math.floor((width - entry.cols) / 2))
-    for i = 0, n - 1 do
-      local row = r1 + i
+    for row = r1, r2 do
       local line = lines[row + 1]
-      local sc = i == 0 and c1 or math.min(c1, #line)
-      local ec = i == n - 1 and c2 or #line
+      local sc = row == r1 and c1 or math.min(c1, #line)
+      local ec = row == r2 and c2 or #line
       if ec > sc then
         mark(row, sc, { end_col = ec, conceal = '' })
       end
-      if entry.lines[i + 1] then
-        mark(row, sc, { virt_text = { { entry.lines[i + 1], entry.hl } }, virt_text_win_col = col })
+      -- One image row on each screen row of the line.
+      local starts = { sc }
+      vim.list_extend(starts, wrap_cols(row))
+      for _, c in ipairs(starts) do
+        n = n + 1
+        if entry.lines[n] then
+          mark(row, c, { virt_text = { { entry.lines[n], entry.hl } }, virt_text_win_col = col })
+        end
       end
     end
     if entry.rows > n then
@@ -317,22 +364,31 @@ local function draw(buf, parser, ranges, in_redraw)
   -- Inline math. Neovim wraps lines by their raw width: hidden text still counts, and
   -- inline virtual text adds to it. So the image is drawn over the first cells of the
   -- source and only the rest is hidden; the line then wraps exactly like the raw text.
-  -- Falls back to inline cells when the image is wider than its source, or when the
-  -- source straddles a screen-line break (overlays do not wrap).
+  -- Overlays do not wrap. When the source straddles a screen-line break, the image goes
+  -- over the first piece of it, on either side of the break, that is wide enough.
+  -- Falls back to inline cells when no piece is: the image is wider than its source,
+  -- or the break leaves two short pieces.
   local function place_inline(r1, c1, r2, c2, entry)
     local line = lines[r1 + 1]
     if r1 == r2 then
-      local b, w = c1, 0
-      while b < c2 and w < entry.cols do
-        local len = vim.str_utf_end(line, b + 1) + 1
-        w = w + dw(line:sub(b + 1, b + len))
-        b = b + len
+      local starts = { c1 }
+      for _, c in ipairs(wrap_cols(r1)) do
+        if c > c1 and c < c2 then
+          starts[#starts + 1] = c
+        end
       end
-      if w == entry.cols then
-        local p1 = vim.fn.screenpos(win, r1 + 1, c1 + 1)
-        local p2 = vim.fn.screenpos(win, r1 + 1, b)
-        if p1.row == p2.row then
-          mark(r1, c1, { virt_text = { { entry.lines[1], entry.hl } }, virt_text_pos = 'overlay' })
+      for k, s in ipairs(starts) do
+        local b, w = s, 0
+        while b < (starts[k + 1] or c2) and w < entry.cols do
+          local len = vim.str_utf_end(line, b + 1) + 1
+          w = w + dw(line:sub(b + 1, b + len))
+          b = b + len
+        end
+        if w == entry.cols then
+          if s > c1 then
+            mark(r1, c1, { end_col = s, conceal = '' })
+          end
+          mark(r1, s, { virt_text = { { entry.lines[1], entry.hl } }, virt_text_pos = 'overlay' })
           if c2 > b then
             mark(r1, b, { end_col = c2, conceal = '' })
           end
@@ -342,6 +398,7 @@ local function draw(buf, parser, ranges, in_redraw)
     end
     mark(r1, c1, { end_row = r2, end_col = c2, conceal = '' })
     mark(r1, c1, { virt_text = { { entry.lines[1], entry.hl } }, virt_text_pos = 'inline' })
+    wraps[r1] = nil -- inline cells move the breaks after them
   end
 
   -- Inline pass: math, inline code, and width corrections.
@@ -374,7 +431,7 @@ local function draw(buf, parser, ranges, in_redraw)
         local standalone = lines[r1 + 1]:sub(1, c1):match('^%s*$') and lines[r2 + 1]:sub(c2 + 1):match('^%s*$')
         local display = #delim >= 2 and standalone ~= nil
         if tex ~= '' and not (cur >= r1 and cur <= r2) then
-          local entry = lookup(tex, display, display and (r2 - r1 + 1) or nil)
+          local entry = lookup(tex, display, display and screen_rows(r1, r2) or nil)
           if entry and entry.state == 'error' then
             math_error(r2, entry)
           elseif entry and entry.state == 'ready' then
@@ -696,7 +753,7 @@ local function draw(buf, parser, ranges, in_redraw)
           local a, b = r1 + 1, r2 - 1
           if b >= a and not (cur >= r1 and cur <= r2) then
             local tex = vim.trim(table.concat(vim.list_slice(lines, a + 1, b + 1), '\n'))
-            local entry = tex ~= '' and lookup(tex, true, b - a + 1)
+            local entry = tex ~= '' and lookup(tex, true, screen_rows(a, b))
             if entry and entry.state == 'error' then
               math_error(b, entry)
             elseif entry and entry.state == 'ready' then

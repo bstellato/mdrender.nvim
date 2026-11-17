@@ -45,6 +45,44 @@ return {
     H.ok(H.find(7, function(d) return d.virt_text_win_col ~= nil end), 'image in the fence')
   end },
 
+  { 'display math: a source line that wraps gets an image row on each screen row', function()
+    local long = 'x_{1}' .. string.rep('+x_{1}', 30) -- 185 columns in a window of 100
+    H.open({ 'Text', '$$', long, '$$', '', 'end' }, 5)
+    vim.cmd('redraw')
+    local win = api.nvim_get_current_win()
+    local screen = {}
+    for row = 1, 3 do
+      for _, d in ipairs(H.marks(nil, row)) do
+        if d.virt_text_win_col then
+          H.ok(d.virt_text[1][1]:find(H.PLACEHOLDER, 1, true), 'image row on line ' .. row)
+          table.insert(screen, vim.fn.screenpos(win, row + 1, d.col + 1).row)
+        end
+      end
+    end
+    -- Lines 1 to 3 start on screen row 2; the long one takes two rows.
+    H.eq({ 2, 3, 4, 5 }, screen, 'screen rows with an image row')
+    H.ok(not H.find(3, function(d) return d.virt_lines ~= nil end), 'no rows added below')
+  end },
+
+  { 'inline math across a line break is drawn after the break', function()
+    local tex = '$\\alpha' .. string.rep('+\\alpha', 9) .. '$' -- 70 columns of source
+    local line = string.rep('word ', 18) .. tex .. ' end' -- the formula starts at column 90
+    H.open({ line, '', 'end' }, 2)
+    vim.cmd('redraw')
+    local win = api.nvim_get_current_win()
+    local img = H.image(0)
+    H.ok(img, 'image drawn')
+    H.eq('overlay', img.virt_text_pos, 'drawn over the source')
+    H.ok(img.col > 90, 'image starts after the break, at column ' .. img.col)
+    local cells = vim.fn.strchars(img.virt_text[1][1]) / 3 -- a placeholder and two diacritics per cell
+    H.eq(
+      vim.fn.screenpos(win, 1, img.col + 1).row,
+      vim.fn.screenpos(win, 1, img.col + cells).row,
+      'screen row of the last image cell'
+    )
+    H.ok(H.find(0, function(d) return d.conceal == '' and d.col == 90 end), 'source before the break hidden')
+  end },
+
   { 'a broken formula shows the TeX error', function()
     H.open(doc, last)
     local err = H.find(10, function(d) return d.virt_text_pos == 'eol' end)
