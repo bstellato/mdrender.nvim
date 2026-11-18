@@ -48,7 +48,7 @@ M.config = {
 local state = {} -- buf -> {row, timer}
 -- Up to Neovim 0.12, a line wraps by its raw width, hidden text included. From 0.13,
 -- 'wrap' follows the concealed width. Once 0.13 is the oldest supported version, this
--- is always false: delete it and the code it guards (see .github/workflows/test.yml).
+-- is always false: delete it and the code it guards (#6).
 local raw_wrap = vim.fn.has('nvim-0.13') == 0
 local cell -- {cw, ch}
 local fg_hex = '#000000'

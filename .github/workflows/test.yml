@@ -23,7 +23,7 @@ jobs:
       matrix:
         # v0.11.0 is the oldest supported version (see the README). When it becomes
         # v0.13.0 or later, delete the code under `raw_wrap` in lua/mdrender/init.lua
-        # and the cases under `old_wrap` in test/spec_math.lua.
+        # and the cases under `old_wrap` in test/spec_math.lua (#6).
         nvim: [v0.11.0, stable, nightly]
     # Nightly breakage is reported in the job but does not block a merge.
     continue-on-error: ${{ matrix.nvim == 'nightly' }}
