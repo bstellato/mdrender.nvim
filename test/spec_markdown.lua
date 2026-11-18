@@ -211,4 +211,14 @@ return {
     H.m._render(buf)
     H.eq(0, #H.marks(buf), 'marks in a text buffer')
   end },
+
+  { 'a buffer shown only in another tab page keeps its decorations', function()
+    local buf = H.open({ 'text', '', '---', '', 'end' }, 4)
+    local before = #H.marks(buf)
+    H.ok(before > 0, 'decorated')
+    vim.cmd('tabnew')
+    H.m._render(buf)
+    H.eq(before, #H.marks(buf), 'marks after a redraw from the other tab page')
+    vim.cmd('tabclose')
+  end },
 }

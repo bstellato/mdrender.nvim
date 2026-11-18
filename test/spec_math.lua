@@ -19,6 +19,11 @@ local doc = {
 }
 local last = #doc - 1
 
+-- Up to Neovim 0.12 a line wraps by its raw width, hidden text included.
+local old_wrap = vim.fn.has('nvim-0.13') == 0
+local long = 'x_{1}' .. string.rep('+x_{1}', 45) -- 275 columns: three rows in a window of 100
+local wrapped = { 'Text', '$$', long, '$$', '', '```math', long, '```', '', 'end' }
+
 return {
   { 'the renderer is installed', function()
     H.ok(vim.uv.fs_stat('node/node_modules/mathjax-full'), 'run `cd node && npm install` first')
@@ -43,6 +48,253 @@ return {
   { 'math fences are drawn like display math', function()
     H.open(doc, last)
     H.ok(H.find(7, function(d) return d.virt_text_win_col ~= nil end), 'image in the fence')
+  end },
+
+  { 'display math: a source line that wraps gets an image row on each screen row', function()
+    local buf = H.open(wrapped, #wrapped - 1)
+    local win = api.nvim_get_current_win()
+    local cpo = vim.o.cpoptions
+    -- Breaks at word boundaries, breaks at the window edge, and rows of two widths
+    -- ("n" in 'cpoptions': wrapped rows also use the number column).
+    local setups = {
+      function() end,
+      function() vim.wo.linebreak = false end,
+      function() vim.wo.number, vim.o.cpoptions = true, cpo .. 'n' end,
+    }
+    for k, setup in ipairs(setups) do
+      setup()
+      H.settle(buf)
+      vim.cmd('redraw')
+      local what = ' (setup ' .. k .. ')'
+      local textoff = vim.fn.getwininfo(win)[1].textoff
+      -- The lines drawn over (0-based): the `$$` block, and the body of the math fence.
+      for _, block in ipairs({ { 1, 3 }, { 6, 6 } }) do
+        local first, lines = block[1], block[2] - block[1] + 1
+        local top = vim.fn.screenpos(win, first + 1, 1).row
+        local n = vim.fn.screenpos(win, block[2] + 2, 1).row - top
+        -- Up to Neovim 0.12 the long line takes three rows; from 0.13 hidden text does not wrap.
+        H.eq(lines + (old_wrap and 2 or 0), n, 'screen rows of the block at line ' .. first .. what)
+        local rows, seen = {}, {}
+        for row = first, block[2] do
+          for _, d in ipairs(H.marks(nil, row)) do
+            if d.virt_text_win_col then
+              local r = vim.fn.screenpos(win, row + 1, d.col + 1).row
+              table.insert(rows, r)
+              H.ok(not seen[d.virt_text[1][1]], 'a different image row on screen row ' .. r)
+              seen[d.virt_text[1][1]] = true
+              if d.col > 0 then
+                H.eq(r - 1, vim.fn.screenpos(win, row + 1, d.col).row, 'mark at the first column of screen row ' .. r)
+              end
+              H.ok(
+                vim.fn.screenstring(r, textoff + d.virt_text_win_col + 1):find(H.PLACEHOLDER, 1, true),
+                'image cell drawn on screen row ' .. r .. what
+              )
+            end
+          end
+        end
+        H.eq(vim.fn.range(top, top + n - 1), rows, 'screen rows with an image row')
+        H.ok(not H.find(block[2], function(d) return d.virt_lines ~= nil end), 'no rows added below')
+      end
+    end
+    vim.wo.number, vim.o.cpoptions = false, cpo
+  end },
+
+  { 'display math: a line that ends at the window edge takes no extra row', function()
+    local buf = H.open({ '$$', 'xx' .. string.rep('+x', 99), '$$', '', 'end' }, 4) -- 200 columns
+    vim.wo.linebreak = false
+    H.settle(buf)
+    local n = 0
+    for _, d in ipairs(H.marks(nil, 1)) do
+      n = n + (d.virt_text_win_col and 1 or 0)
+    end
+    H.eq(old_wrap and 2 or 1, n, 'image rows on the long line')
+  end },
+
+  { 'display math below the window: the wrapped rows are placed before they scroll in', function()
+    local doc = {}
+    for i = 1, 50 do
+      doc[i] = 'line ' .. i
+    end
+    vim.list_extend(doc, wrapped)
+    H.open(doc, 0) -- 38 rows show; the block is in the margin that is decorated ahead
+    local n = 0
+    for row = 51, 53 do
+      for _, d in ipairs(H.marks(nil, row)) do
+        n = n + (d.virt_text_win_col and 1 or 0)
+      end
+    end
+    H.eq(old_wrap and 5 or 3, n, 'image rows')
+  end },
+
+  { 'display math: a change of the wrapping options is drawn again', function()
+    if not old_wrap then
+      return -- the options do not change the rows of hidden text
+    end
+    H.open(wrapped, #wrapped - 1)
+    local function image_rows()
+      local n = 0
+      for _, d in ipairs(H.marks(nil, 2)) do
+        n = n + (d.virt_text_win_col and 1 or 0)
+      end
+      return n
+    end
+    H.eq(3, image_rows(), 'image rows on the long line')
+    -- OptionSet is fired by hand: Neovim does not fire it while the test script runs.
+    vim.cmd('setlocal nowrap')
+    api.nvim_exec_autocmds('OptionSet', { pattern = 'wrap' })
+    H.ok(vim.wait(2000, function() return image_rows() == 1 end, 10), 'one image row without wrapping')
+    vim.cmd('setlocal wrap')
+    api.nvim_exec_autocmds('OptionSet', { pattern = 'wrap' })
+    H.ok(vim.wait(2000, function() return image_rows() == 3 end, 10), 'three image rows with wrapping')
+  end },
+
+  { 'display math: a sign column that appears is seen by the next screen update', function()
+    if not old_wrap then
+      return
+    end
+    -- 296 columns: three rows of 100, four rows of 98.
+    local buf = H.open({ '$$', 'xx' .. string.rep('+x', 147), '$$', '', 'end' }, 4)
+    vim.wo.linebreak = false
+    H.settle(buf)
+    vim.cmd('redraw')
+    local function image_rows()
+      local n = 0
+      for _, d in ipairs(H.marks(nil, 1)) do
+        n = n + (d.virt_text_win_col and 1 or 0)
+      end
+      return n
+    end
+    H.eq(3, image_rows(), 'image rows on the long line')
+    vim.wait(150) -- the redraw scheduled by opening the buffer has run
+    -- No event reports the new column.
+    api.nvim_buf_set_extmark(buf, api.nvim_create_namespace('test_signs'), 4, 0, { sign_text = '>>' })
+    vim.cmd('redraw')
+    H.ok(vim.wait(2000, function() return image_rows() == 4 end, 10), 'four image rows beside the sign column')
+  end },
+
+  { 'two windows of different widths: the layout follows the current window', function()
+    if not old_wrap then
+      return
+    end
+    local buf = H.open(wrapped, #wrapped - 1)
+    vim.cmd('30vsplit')
+    local function image_rows()
+      local n = 0
+      for _, d in ipairs(H.marks(buf, 2)) do
+        n = n + (d.virt_text_win_col and 1 or 0)
+      end
+      return n
+    end
+    -- Screen rows of the long line in the current window.
+    local function rows()
+      return api.nvim_win_text_height(0, { start_row = 2, end_row = 2, start_vcol = 0 }).all
+    end
+    local narrow = rows()
+    H.ok(vim.wait(2000, function() return image_rows() == narrow end, 10), 'rows for the narrow window: ' .. narrow)
+    vim.cmd('wincmd w')
+    local wide = rows()
+    H.ok(wide < narrow, 'the other window is wider')
+    H.ok(vim.wait(2000, function() return image_rows() == wide end, 10), 'rows for the wide window: ' .. wide)
+    vim.cmd('wincmd w')
+    H.ok(vim.wait(2000, function() return image_rows() == narrow end, 10), 'rows for the narrow window again')
+    -- The other window has another width; drawing it must not start a new layout.
+    vim.wait(150)
+    local clear, draws = api.nvim_buf_clear_namespace, 0
+    api.nvim_buf_clear_namespace = function(...)
+      draws = draws + 1
+      return clear(...)
+    end
+    for _ = 1, 3 do
+      vim.cmd('redraw!')
+      vim.wait(30)
+    end
+    api.nvim_buf_clear_namespace = clear
+    -- A redraw scheduled earlier may still land here; a loop makes one per update.
+    H.ok(draws < 3, 'layouts made by three plain screen updates: ' .. draws)
+  end },
+
+  { 'inline math across a line break is drawn after the break', function()
+    if not old_wrap then
+      return -- hiding the source before the break moves the break
+    end
+    local tex = '$\\alpha' .. string.rep('+\\alpha', 9) .. '$' -- 70 columns of source
+    local line = string.rep('word ', 18) .. tex .. ' end' -- the formula starts at column 90
+    H.open({ line, '', 'end' }, 2)
+    vim.cmd('redraw')
+    local win = api.nvim_get_current_win()
+    local img = H.image(0)
+    H.ok(img, 'image drawn')
+    H.eq('overlay', img.virt_text_pos, 'drawn over the source')
+    local r = vim.fn.screenpos(win, 1, img.col + 1).row
+    H.eq(r - 1, vim.fn.screenpos(win, 1, img.col).row, 'image at the first column after the break')
+    local cells = vim.fn.strchars(img.virt_text[1][1]) / 3 -- a placeholder and two diacritics per cell
+    H.eq(r, vim.fn.screenpos(win, 1, img.col + cells).row, 'screen row of the last image cell')
+    H.ok(H.find(0, function(d) return d.conceal == '' and d.col == 90 and d.end_col == img.col end),
+      'source before the break hidden')
+    H.ok(H.find(0, function(d) return d.conceal == '' and d.col == img.col + cells and d.end_col == 90 + #tex end),
+      'source after the image hidden')
+  end },
+
+  { 'inline math near the window edge is drawn on one screen row', function()
+    if not old_wrap then
+      return
+    end
+    -- The formula starts at every column from 70 to 99 of a window 100 columns wide.
+    local doc = {}
+    for pad = 70, 99 do
+      -- A second formula follows. When the first one is drawn as inline cells, these
+      -- move it across the next break.
+      local tex = '$a + b + c + d + e + f + g$'
+      vim.list_extend(doc, { string.rep('w', pad - 1) .. ' ' .. tex .. ' end ' .. string.rep('v', 35) .. ' ' .. tex .. ' tail', '' })
+    end
+    vim.o.lines = 160
+    local buf = H.open(doc, #doc - 1)
+    local win = api.nvim_get_current_win()
+    local cells = vim.fn.strchars(H.image(0).virt_text[1][1]) / 3 -- a placeholder and two diacritics per cell
+    for _, linebreak in ipairs({ true, false }) do
+      vim.wo.linebreak = linebreak
+      H.settle(buf)
+      vim.cmd('redraw')
+      local over, moved, inline = 0, 0, 0
+      for line = 0, #doc - 2, 2 do
+        local what = (' (line %d, linebreak %s)'):format(line, tostring(linebreak))
+        local start = line / 2 + 70
+        -- Image cells on each screen row of the line: whole images only.
+        local counts, total = {}, 0
+        for r = vim.fn.screenpos(win, line + 1, 1).row, vim.fn.screenpos(win, line + 2, 1).row - 1 do
+          local n = 0
+          for c = 1, 100 do
+            local ch = vim.fn.screenstring(r, c)
+            n = n + (ch:find(H.PLACEHOLDER, 1, true) and 1 or 0)
+            H.ok(ch ~= '+', 'no TeX source on screen row ' .. r .. what)
+          end
+          if n % cells ~= 0 then
+            table.insert(counts, n)
+          end
+          total = total + n
+        end
+        H.eq({ {}, 2 * cells }, { counts, total }, 'rows with part of an image, and image cells' .. what)
+        -- The mark that draws the first formula (its source is 27 columns).
+        local img = H.find(line, function(d) return d.virt_text and d.col >= start and d.col < start + 27 end)
+        if img.virt_text_pos == 'overlay' then
+          over, moved = over + 1, moved + (img.col > start and 1 or 0)
+        else
+          inline = inline + 1
+        end
+        -- Without 'linebreak' the row ends at column 100, wherever the words end.
+        if not linebreak and start + cells <= 100 then
+          H.eq({ 'overlay', start }, { img.virt_text_pos, img.col }, 'image at the start of the formula' .. what)
+        end
+      end
+      H.ok(over > 0 and moved > 0 and inline > 0, ('drawn in place %d, after the break %d, as inline cells %d'):format(over - moved, moved, inline))
+    end
+  end },
+
+  { 'an image wider than its source is drawn as inline cells, in place', function()
+    H.open({ 'Wide $MMMMMMMM$ here.', '', 'end' }, 2)
+    local img = H.image(0)
+    H.ok(img, 'image drawn')
+    H.eq({ 'inline', 5, 1 }, { img.virt_text_pos, img.col, #img.virt_text }, 'placement, column, chunks')
   end },
 
   { 'a broken formula shows the TeX error', function()

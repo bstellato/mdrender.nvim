@@ -46,6 +46,10 @@ M.config = {
 }
 
 local state = {} -- buf -> {row, timer}
+-- Up to Neovim 0.12, a line wraps by its raw width, hidden text included. From 0.13,
+-- 'wrap' follows the concealed width. Once 0.13 is the oldest supported version, this
+-- is always false: delete it and the code it guards (#6).
+local raw_wrap = vim.fn.has('nvim-0.13') == 0
 local cell -- {cw, ch}
 local fg_hex = '#000000'
 
@@ -184,6 +188,23 @@ local function visible_ranges(buf)
   return merged
 end
 
+-- Extmarks belong to the buffer, so the layout (wrapping, centring) is made for one
+-- window: the current one when it shows the buffer, else the first one that does, in
+-- any tab page.
+local function layout_win(buf)
+  local cur = api.nvim_get_current_win()
+  if api.nvim_win_get_buf(cur) == buf then
+    return cur
+  end
+  return vim.fn.win_findbuf(buf)[1]
+end
+
+-- Columns of the text area of a window.
+local function text_cols(win)
+  local info = vim.fn.getwininfo(win)[1]
+  return info.width - info.textoff
+end
+
 -- Decorate the rows in `ranges`, once the parser has parsed them. In a screen update
 -- (`in_redraw`) code that needs a scratch buffer is skipped; then it returns true, and
 -- the caller draws again after the update.
@@ -192,12 +213,13 @@ local function draw(buf, parser, ranges, in_redraw)
   if not api.nvim_buf_is_valid(buf) or not state[buf] then
     return
   end
-  local win = vim.fn.bufwinid(buf)
+  local win = layout_win(buf)
   api.nvim_buf_clear_namespace(buf, ns, 0, -1)
-  if win == -1 then
+  if not win then
+    state[buf].drawn = nil
     return
   end
-  state[buf].drawn = ranges
+  state[buf].drawn, state[buf].win, state[buf].cols = ranges, win, text_cols(win)
   -- Captures of a tree within the ranges. Trees outside them are skipped (after a
   -- scroll through the file there is one inline tree per paragraph parsed so far),
   -- and a node that spans two ranges is returned once.
@@ -237,8 +259,7 @@ local function draw(buf, parser, ranges, in_redraw)
     end,
   })
   local cur = api.nvim_win_get_cursor(win)[1] - 1
-  local info = vim.fn.getwininfo(win)[1]
-  local win_width = math.max(20, info.width - info.textoff)
+  local win_width = math.max(20, state[buf].cols)
   local width = math.min(win_width, M.config.max_width)
   local cfg = M.config.math
   local math_on = cfg.enabled and vim.o.termguicolors
@@ -284,25 +305,86 @@ local function draw(buf, parser, ranges, in_redraw)
     })
   end
 
+  -- Under raw wrapping a long source line takes several screen rows whatever is drawn
+  -- over it. wrap_cols(row) lists the byte columns where the screen rows after the
+  -- first one start (empty when the line fits, or when hidden text does not wrap).
+  -- It is computed once per line: the calls below read the line from its start.
+  local text_width = math.max(1, state[buf].cols)
+  local cpo_n = vim.o.cpoptions:find('n', 1, true) ~= nil
+  local wraps = {}
+  local function wrap_cols(row)
+    if wraps[row] then
+      return wraps[row]
+    end
+    local cols, last = {}, #lines[row + 1] - 1
+    -- Screen row (from 0) of the character at byte column c. Virtual columns count the
+    -- cells that wrapping adds ('linebreak', 'breakindent', 'showbreak'), so the row
+    -- follows from the column. With "n" in 'cpoptions' the rows after the first are
+    -- wider, and Neovim is asked instead (slower).
+    local function at(c)
+      local vcol = vim.fn.virtcol({ row + 1, c + 1 }, 1, win)[1]
+      if cpo_n then
+        return api.nvim_win_text_height(win, { start_row = row, end_row = row, start_vcol = 0, end_vcol = vcol }).all - 1
+      end
+      return math.floor((vcol - 1) / text_width)
+    end
+    if raw_wrap and vim.wo[win].wrap and last >= 0 then
+      for j = 1, at(last) do
+        -- Row j starts at virtual column j * text_width + 1. The character there is the
+        -- first one of the row, unless it starts on the row before (a tab, or cells
+        -- added by wrapping): then bisect for the first column on row j.
+        local c = vim.fn.virtcol2col(win, row + 1, j * text_width + 1) - 1
+        if c < 1 or at(c) ~= j then
+          local lo, hi = cols[j - 1] or 0, last
+          while lo < hi do
+            local mid = math.floor((lo + hi) / 2)
+            if at(mid) >= j then
+              hi = mid
+            else
+              lo = mid + 1
+            end
+          end
+          c = lo
+        end
+        cols[j] = c
+      end
+    end
+    wraps[row] = cols
+    return cols
+  end
+  -- Screen rows taken by the lines r1..r2.
+  local function screen_rows(r1, r2)
+    local n = 0
+    for row = r1, r2 do
+      n = n + 1 + #wrap_cols(row)
+    end
+    return n
+  end
+
   -- Display math over the source lines r1..r2 (c1: start column on r1, c2: end column on r2).
-  -- The image has at least one row per source line, so every line is replaced in place
-  -- and the line count never changes; extra rows go below as virtual lines.
+  -- The image has at least one row per screen row of the source, so the source is
+  -- replaced in place and the text below never moves; extra rows go below as virtual lines.
   -- Rows are drawn at a fixed window column, not as inline text: hidden source text
   -- still counts when Neovim wraps a line, and inline rows would wrap with it.
   local function place_display(r1, c1, r2, c2, entry)
-    local n = r2 - r1 + 1
+    local n = 0
     local indent = dw(lines[r1 + 1]:sub(1, c1))
     local col = math.max(indent, math.floor((width - entry.cols) / 2))
-    for i = 0, n - 1 do
-      local row = r1 + i
+    for row = r1, r2 do
       local line = lines[row + 1]
-      local sc = i == 0 and c1 or math.min(c1, #line)
-      local ec = i == n - 1 and c2 or #line
+      local sc = row == r1 and c1 or math.min(c1, #line)
+      local ec = row == r2 and c2 or #line
       if ec > sc then
         mark(row, sc, { end_col = ec, conceal = '' })
       end
-      if entry.lines[i + 1] then
-        mark(row, sc, { virt_text = { { entry.lines[i + 1], entry.hl } }, virt_text_win_col = col })
+      -- One image row on each screen row of the line.
+      local starts = { sc }
+      vim.list_extend(starts, wrap_cols(row))
+      for _, c in ipairs(starts) do
+        n = n + 1
+        if entry.lines[n] then
+          mark(row, c, { virt_text = { { entry.lines[n], entry.hl } }, virt_text_win_col = col })
+        end
       end
     end
     if entry.rows > n then
@@ -317,31 +399,60 @@ local function draw(buf, parser, ranges, in_redraw)
   -- Inline math. Neovim wraps lines by their raw width: hidden text still counts, and
   -- inline virtual text adds to it. So the image is drawn over the first cells of the
   -- source and only the rest is hidden; the line then wraps exactly like the raw text.
-  -- Falls back to inline cells when the image is wider than its source, or when the
-  -- source straddles a screen-line break (overlays do not wrap).
+  -- Overlays do not wrap. When the cells under the image straddle a screen-line break,
+  -- the image goes over the source after the break instead, if that part is wide enough.
+  -- Falls back to inline cells when the image is wider than the source it can cover.
   local function place_inline(r1, c1, r2, c2, entry)
     local line = lines[r1 + 1]
-    if r1 == r2 then
-      local b, w = c1, 0
+    local s = r1 == r2 and c1 or nil
+    while s do
+      -- s..b: the source cells under the image.
+      local b, w = s, 0
       while b < c2 and w < entry.cols do
         local len = vim.str_utf_end(line, b + 1) + 1
         w = w + dw(line:sub(b + 1, b + len))
         b = b + len
       end
-      if w == entry.cols then
-        local p1 = vim.fn.screenpos(win, r1 + 1, c1 + 1)
-        local p2 = vim.fn.screenpos(win, r1 + 1, b)
-        if p1.row == p2.row then
-          mark(r1, c1, { virt_text = { { entry.lines[1], entry.hl } }, virt_text_pos = 'overlay' })
-          if c2 > b then
-            mark(r1, b, { end_col = c2, conceal = '' })
+      if w ~= entry.cols then
+        break
+      end
+      -- Where the next screen row starts within the cells s..b, if it does.
+      local split, after = false, nil
+      if raw_wrap then
+        for _, c in ipairs(wrap_cols(r1)) do
+          if c > s and c < b then
+            split, after = true, c
+            break
           end
-          return
         end
+      else
+        split = vim.fn.screenpos(win, r1 + 1, s + 1).row ~= vim.fn.screenpos(win, r1 + 1, b).row
+      end
+      if not split then
+        if s > c1 then
+          mark(r1, c1, { end_col = s, conceal = '' })
+        end
+        mark(r1, s, { virt_text = { { entry.lines[1], entry.hl } }, virt_text_pos = 'overlay' })
+        if c2 > b then
+          mark(r1, b, { end_col = c2, conceal = '' })
+        end
+        return
+      end
+      -- Without raw wrapping, hiding the source before the break would move the break.
+      s = after
+    end
+    -- Inline cells wrap like text, cell by cell. When the image does not fit in the rest
+    -- of its screen row, blank cells fill that rest and the image starts the next row.
+    local chunks = { { entry.lines[1], entry.hl } }
+    if raw_wrap and not cpo_n and vim.wo[win].wrap then
+      local rest = text_width - (vim.fn.virtcol({ r1 + 1, c1 + 1 }, 1, win)[1] - 1) % text_width
+      if entry.cols > rest and entry.cols <= text_width then
+        table.insert(chunks, 1, { string.rep(' ', rest) })
       end
     end
     mark(r1, c1, { end_row = r2, end_col = c2, conceal = '' })
-    mark(r1, c1, { virt_text = { { entry.lines[1], entry.hl } }, virt_text_pos = 'inline' })
+    mark(r1, c1, { virt_text = chunks, virt_text_pos = 'inline' })
+    wraps[r1] = nil -- inline cells move the breaks after them
   end
 
   -- Inline pass: math, inline code, and width corrections.
@@ -374,7 +485,7 @@ local function draw(buf, parser, ranges, in_redraw)
         local standalone = lines[r1 + 1]:sub(1, c1):match('^%s*$') and lines[r2 + 1]:sub(c2 + 1):match('^%s*$')
         local display = #delim >= 2 and standalone ~= nil
         if tex ~= '' and not (cur >= r1 and cur <= r2) then
-          local entry = lookup(tex, display, display and (r2 - r1 + 1) or nil)
+          local entry = lookup(tex, display, display and screen_rows(r1, r2) or nil)
           if entry and entry.state == 'error' then
             math_error(r2, entry)
           elseif entry and entry.state == 'ready' then
@@ -696,7 +807,7 @@ local function draw(buf, parser, ranges, in_redraw)
           local a, b = r1 + 1, r2 - 1
           if b >= a and not (cur >= r1 and cur <= r2) then
             local tex = vim.trim(table.concat(vim.list_slice(lines, a + 1, b + 1), '\n'))
-            local entry = tex ~= '' and lookup(tex, true, b - a + 1)
+            local entry = tex ~= '' and lookup(tex, true, screen_rows(a, b))
             if entry and entry.state == 'error' then
               math_error(b, entry)
             elseif entry and entry.state == 'ready' then
@@ -785,6 +896,7 @@ local function render(buf, sync)
   local ranges = visible_ranges(buf)
   if #ranges == 0 then
     api.nvim_buf_clear_namespace(buf, ns, 0, -1)
+    st.drawn = nil
     return
   end
   -- A render that finishes after a newer one has started draws nothing: its view is
@@ -878,7 +990,7 @@ function M.attach(buf)
   for _, win in ipairs(vim.fn.win_findbuf(buf)) do
     set_window(win)
   end
-  api.nvim_create_autocmd({ 'TextChanged', 'TextChangedI', 'BufWinEnter' }, {
+  api.nvim_create_autocmd({ 'TextChanged', 'TextChangedI', 'BufWinEnter', 'WinEnter' }, {
     group = group, buffer = buf,
     callback = function(ev)
       if ev.event == 'BufWinEnter' then
@@ -1088,6 +1200,24 @@ function M.setup(opts)
         end
       end
       return false
+    end,
+    -- No event reports a number, fold or sign column that appears or goes, and the new
+    -- text width is known only once the screen update is done. Draw again after it.
+    on_end = function()
+      for buf, st in pairs(state) do
+        if st.win and api.nvim_win_is_valid(st.win) and text_cols(st.win) ~= st.cols then
+          schedule(buf, 0)
+        end
+      end
+    end,
+  })
+  -- Options that change where lines wrap. (A change of the text width is seen by the
+  -- decoration provider above.)
+  api.nvim_create_autocmd('OptionSet', {
+    group = group,
+    pattern = { 'wrap', 'linebreak', 'breakindent', 'breakindentopt', 'showbreak', 'cpoptions' },
+    callback = function()
+      render_all()
     end,
   })
   api.nvim_create_autocmd({ 'VimResized', 'WinResized' }, {

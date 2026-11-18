@@ -21,6 +21,7 @@ local defaults = vim.deepcopy(H.m.config)
 
 --- Start each test from one empty window and the default settings.
 function H.reset()
+  vim.o.columns, vim.o.lines = 100, 40
   vim.cmd('silent! only!')
   vim.cmd('enew!')
   for _, buf in ipairs(api.nvim_list_bufs()) do
